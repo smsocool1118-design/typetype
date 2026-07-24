@@ -1,0 +1,62 @@
+{
+  "name": "sherpa-onnx-win-arm64",
+  "version": "1.12.39",
+  "description": "Speech-to-text, text-to-speech, speaker diarization, and speech enhancement using Next-gen Kaldi without internet connection (Windows ARM64 build, compiled from source v1.12.39) [cpu field intentionally omitted: resolved at runtime by addon.js via os.arch()]",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/csukuangfj/sherpa-onnx.git"
+  },
+  "keywords": [
+    "speech to text",
+    "text to speech",
+    "transcription",
+    "real-time speech recognition",
+    "without internet connection",
+    "locally",
+    "local",
+    "embedded systems",
+    "open source",
+    "diarization",
+    "speaker diarization",
+    "speaker recognition",
+    "speaker",
+    "speaker segmentation",
+    "speaker verification",
+    "spoken language identification",
+    "sherpa",
+    "zipformer",
+    "asr",
+    "tts",
+    "stt",
+    "c++",
+    "onnxruntime",
+    "onnx",
+    "ai",
+    "next-gen kaldi",
+    "offline",
+    "privacy",
+    "open source",
+    "streaming speech recognition",
+    "speech",
+    "recognition",
+    "vad",
+    "node-addon-api",
+    "speaker id",
+    "language id",
+    "speech enhancement",
+    "denoising"
+  ],
+  "author": "The next-gen Kaldi team",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/csukuangfj/sherpa-onnx/issues"
+  },
+  "homepage": "https://github.com/csukuangfj/sherpa-onnx#readme",
+  "os": [
+    "win32"
+  ]
+}

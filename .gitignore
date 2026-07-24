@@ -11,6 +11,7 @@ typetype.log
 resources/models/
 resources/translation-models/
 
-# ARM64 build inputs — regenerable, and electron.exe (168MB) exceeds GitHub's 100MB limit.
-# Rebuilt by scripts/prepare-arm64-deps.cjs + Electron download (see docs/arm64-build.md).
-vendor/
+# Official ARM64 Electron runtime — downloadable, and electron.exe (168MB) exceeds
+# GitHub's 100MB limit. Obtain per docs/arm64-build.md. (vendor/sherpa-onnx-win-arm64/
+# IS tracked — it's custom-compiled and has no official ARM64 npm package.)
+vendor/electron-arm64/
