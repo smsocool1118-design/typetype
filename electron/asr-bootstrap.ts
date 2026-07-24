@@ -30,7 +30,8 @@ const DEFAULT_HOTWORD_STATUS: AsrHotwordStatus = {
 
 const SENSE_VOICE_MODEL_DIR = 'sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09';
 const STREAMING_MIXED_MODEL_DIR = 'sherpa-onnx-streaming-paraformer-trilingual-zh-cantonese-en';
-const STREAMING_XLARGE_MODEL_DIR = 'sherpa-onnx-streaming-zipformer-ctc-zh-xlarge-int8-2025-06-30';
+// 中英双语流式 zipformer transducer——0.5.0 起的流式默认模型，中英混说 + 准确率优于 paraformer。
+const STREAMING_BILINGUAL_MODEL_DIR = 'sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20';
 const PRO_HIGH_ACCURACY_MODEL_DIR = 'typetype-professional-high-accuracy-voice-package';
 const PRO_HIGH_ACCURACY_DOWNLOAD_URL = process.env.TYPETYPE_PRO_VOICE_PACKAGE_URL || '';
 
@@ -40,10 +41,10 @@ const MODEL_DOWNLOAD_URLS = {
     archiveName: `${SENSE_VOICE_MODEL_DIR}.tar.bz2`,
     modelDirName: SENSE_VOICE_MODEL_DIR,
   },
-  'sherpa-onnx-streaming-zipformer-ctc-zh-xlarge': {
-    url: `https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/${STREAMING_XLARGE_MODEL_DIR}.tar.bz2`,
-    archiveName: `${STREAMING_XLARGE_MODEL_DIR}.tar.bz2`,
-    modelDirName: STREAMING_XLARGE_MODEL_DIR,
+  'sherpa-onnx-streaming-zipformer-bilingual-zh-en': {
+    url: `https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/${STREAMING_BILINGUAL_MODEL_DIR}.tar.bz2`,
+    archiveName: `${STREAMING_BILINGUAL_MODEL_DIR}.tar.bz2`,
+    modelDirName: STREAMING_BILINGUAL_MODEL_DIR,
   },
   'typetype-professional-high-accuracy': {
     url: PRO_HIGH_ACCURACY_DOWNLOAD_URL,
@@ -280,65 +281,39 @@ export async function initializeAsrEngine({
   hotwordContext,
 }: InitializeAsrEngineOptions): Promise<AsrEngine | null> {
   if (settings.recognition_mode === 'streaming_output') {
-    if (settings.streaming_model === 'multilingual_segmented') {
-      const segmentedStreamingSettings: Settings = {
-        ...settings,
-        recognition_mode: 'non_streaming',
-        pinned_model_version: 'sherpa-onnx-sense-voice',
-      };
+    // 流式（边说边出字）统一走"分段近实时离线 SenseVoice"；已删除会字符重复的实时 transducer 流式路径。
+    const segmentedStreamingSettings: Settings = {
+      ...settings,
+      recognition_mode: 'non_streaming',
+      pinned_model_version: 'sherpa-onnx-sense-voice',
+    };
 
-      const configuredEngine = settings.model_path
-        ? await tryCreateEngine([settings.model_path], segmentedStreamingSettings, hotwordManager, hotwordContext)
-        : null;
-      if (configuredEngine) return configuredEngine;
-
-      const engine = await tryCreateEngine(
-        getMixedSegmentedStreamingModelSearchPaths({
-          dataDir,
-          processResourcesPath,
-          appPath,
-        }),
-        segmentedStreamingSettings,
-        hotwordManager,
-        hotwordContext
-      );
-      if (engine) return engine;
-
-      const downloadedPath = await downloadModel('sherpa-onnx-sense-voice', dataDir);
-      if (downloadedPath) {
-        const downloadedEngine = await tryCreateEngine([downloadedPath], segmentedStreamingSettings, hotwordManager, hotwordContext);
-        if (downloadedEngine) {
-          return downloadedEngine;
-        }
-      }
-
-      console.warn('Mixed segmented streaming model is unavailable; falling back to Chinese online streaming');
-    }
+    const configuredEngine = settings.model_path
+      ? await tryCreateEngine([settings.model_path], segmentedStreamingSettings, hotwordManager, hotwordContext)
+      : null;
+    if (configuredEngine) return configuredEngine;
 
     const engine = await tryCreateEngine(
-      getStreamingModelSearchPaths({
+      getMixedSegmentedStreamingModelSearchPaths({
         dataDir,
         processResourcesPath,
         appPath,
-        settings,
       }),
-      settings,
+      segmentedStreamingSettings,
       hotwordManager,
       hotwordContext
     );
     if (engine) return engine;
 
-    const downloadCandidates = ['sherpa-onnx-streaming-zipformer-ctc-zh-xlarge'];
-    for (const candidate of downloadCandidates) {
-      const downloadedPath = await downloadModel(candidate, dataDir);
-      if (downloadedPath) {
-        const downloadedEngine = await tryCreateEngine([downloadedPath], settings, hotwordManager, hotwordContext);
-        if (downloadedEngine) {
-          return downloadedEngine;
-        }
+    const downloadedPath = await downloadModel('sherpa-onnx-sense-voice', dataDir);
+    if (downloadedPath) {
+      const downloadedEngine = await tryCreateEngine([downloadedPath], segmentedStreamingSettings, hotwordManager, hotwordContext);
+      if (downloadedEngine) {
+        return downloadedEngine;
       }
     }
-    return null;
+
+    // 分段离线不可用时，继续落到下方"非流式整段离线"兜底，而不是回退到已删除的实时流式。
   }
 
   if (settings.model_path) {
@@ -433,6 +408,7 @@ async function tryCreateEngine(
     computeBackend: settings.compute_backend,
     recognitionMode: settings.recognition_mode,
     hotwordStatus,
+    senseVoiceLanguage: settings.sense_voice_language,
   });
   try {
     await engine.initialize();
@@ -441,32 +417,6 @@ async function tryCreateEngine(
     console.error('Failed to initialize ASR engine:', error);
     return null;
   }
-}
-
-function getStreamingModelSearchPaths({
-  dataDir,
-  processResourcesPath,
-  appPath,
-  settings,
-}: {
-  dataDir: string;
-  processResourcesPath: string;
-  appPath: string;
-  settings: Settings;
-}): string[] {
-  const preferredModelDirs = settings.streaming_model === 'zh_high_accuracy_realtime'
-    ? [STREAMING_XLARGE_MODEL_DIR, STREAMING_MIXED_MODEL_DIR]
-    : [STREAMING_MIXED_MODEL_DIR, STREAMING_XLARGE_MODEL_DIR];
-  const modelDirs = Array.from(new Set(preferredModelDirs));
-
-  return [
-    ...modelDirs.flatMap((modelDir) => [
-      pathJoin(dataDir, 'models', modelDir),
-      pathJoin(processResourcesPath, 'models', modelDir),
-      pathJoin(appPath, 'resources', 'models', modelDir),
-    ]),
-    ...getModelSearchPaths({ dataDir, processResourcesPath, appPath }),
-  ];
 }
 
 function prepareHotwordStatus(

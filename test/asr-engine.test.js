@@ -15,6 +15,17 @@ test("createRecognizerConfig disables sherpa debug logging", () => {
   assert.equal(config.modelConfig.senseVoice.useItn, true);
 });
 
+test("createRecognizerConfig locks SenseVoice language when provided", () => {
+  const auto = createRecognizerConfig("/tmp/model.onnx", "/tmp/tokens.txt");
+  assert.equal(auto.modelConfig.senseVoice.language, "");
+
+  const zh = createRecognizerConfig("/tmp/model.onnx", "/tmp/tokens.txt", "cpu", 2, "zh");
+  assert.equal(zh.modelConfig.senseVoice.language, "zh");
+
+  const explicitAuto = createRecognizerConfig("/tmp/model.onnx", "/tmp/tokens.txt", "cpu", 2, "auto");
+  assert.equal(explicitAuto.modelConfig.senseVoice.language, "");
+});
+
 test("findModelPath keeps streaming and offline model directories separate", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "typetype-asr-models-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

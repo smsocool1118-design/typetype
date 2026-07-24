@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  AutoPaste,
   FOREGROUND_RESTORE_DELAY_MS,
   createWindowsCaptureForegroundScript,
   createWindowsPasteScript,
@@ -11,6 +12,47 @@ const {
   isSameWindowsForegroundTarget,
   runAutoPasteSequence,
 } = require("../dist-electron/auto-paste.js");
+
+function makeFakeInjector(behavior = {}) {
+  const calls = [];
+  const injector = {
+    calls,
+    async appendText(text) { calls.push(["append", text]); return behavior.appendOk !== false; },
+    async backspace(count) { calls.push(["backspace", count]); return behavior.backspaceOk !== false; },
+    dispose() { calls.push(["dispose"]); },
+  };
+  return injector;
+}
+
+test("injectAppendText delegates to the injector and reports success", async () => {
+  const injector = makeFakeInjector();
+  const autoPaste = new AutoPaste({ forceInjectionEnabled: true, createInjector: () => injector });
+  assert.equal(await autoPaste.injectAppendText("你好"), true);
+  assert.deepEqual(injector.calls, [["append", "你好"]]);
+});
+
+test("injectAppendText disables injection for the session after a failure", async () => {
+  const injector = makeFakeInjector({ appendOk: false });
+  const autoPaste = new AutoPaste({ forceInjectionEnabled: true, createInjector: () => injector });
+  assert.equal(await autoPaste.injectAppendText("x"), false);
+  // 失败后不再尝试注入，直接回退。
+  assert.equal(await autoPaste.injectAppendText("y"), false);
+  assert.deepEqual(injector.calls, [["append", "x"]]);
+});
+
+test("injection is unavailable (returns false) when not supported", async () => {
+  const injector = makeFakeInjector();
+  const autoPaste = new AutoPaste({ forceInjectionEnabled: false, createInjector: () => injector });
+  assert.equal(await autoPaste.injectAppendText("x"), false);
+  assert.deepEqual(injector.calls, []);
+});
+
+test("injectReplaceTail backspaces then retypes", async () => {
+  const injector = makeFakeInjector();
+  const autoPaste = new AutoPaste({ forceInjectionEnabled: true, createInjector: () => injector });
+  assert.equal(await autoPaste.injectReplaceTail(3, "管理科"), true);
+  assert.deepEqual(injector.calls, [["backspace", 3], ["append", "管理科"]]);
+});
 
 test("runAutoPasteSequence restores the previous app before pasting", async () => {
   const calls = [];
@@ -67,7 +109,9 @@ test("createWindowsReplaceRecentTextScript selects recent text with SendKeys bef
 
   assert.match(script, /New-Object -ComObject WScript\.Shell/);
   assert.match(script, /SendKeys\("\^\{END\}"\)/);
-  assert.match(script, /SendKeys\("\+\{LEFT\}"\)/);
+  // 0.5.9：批量重复语法 {LEFT n} 一次选中，替代逐字符循环（那是用户能看着选区爬的根因）。
+  assert.match(script, /SendKeys\("\+\{LEFT \$step\}"\)/);
+  assert.equal(/SendKeys\("\+\{LEFT\}"\)/.test(script), false);
   assert.match(script, /SendKeys\("\^v"\)/);
   assert.match(script, /\$count = 25/);
 });
@@ -112,4 +156,65 @@ test("isSameWindowsForegroundTarget accepts same handle or same process fallback
   assert.equal(isSameWindowsForegroundTarget(expected, sameProcess), true);
   assert.equal(isSameWindowsForegroundTarget(expected, differentProcess), false);
   assert.equal(isSameWindowsForegroundTarget(expected, null), false);
+});
+
+// 0.6.3：上屏热路径不再每次新开 PowerShell。
+function makeInputProcessInjector(behavior = {}) {
+  const calls = [];
+  return {
+    calls,
+    async appendText(text) { calls.push(["append", text]); return behavior.appendOk !== false; },
+    async backspace(count) { calls.push(["backspace", count]); return behavior.backspaceOk !== false; },
+    async pressPaste() { calls.push(["pressPaste"]); return behavior.pasteOk !== false; },
+    async pressCopy() { calls.push(["pressCopy"]); return behavior.copyOk !== false; },
+    async getForegroundWindow() {
+      calls.push(["getForegroundWindow"]);
+      return behavior.foreground ?? '{"hwnd":"9","pid":"8","title":"记事本","process":"notepad"}';
+    },
+    async restoreForegroundWindow(target) {
+      calls.push(["restoreForegroundWindow", target]);
+      return behavior.restoreOk !== false;
+    },
+    async warmup() { calls.push(["warmup"]); return true; },
+    dispose() { calls.push(["dispose"]); },
+  };
+}
+
+test("0.6.3: 读前台窗口走常驻进程，不再起 PowerShell", async () => {
+  const injector = makeInputProcessInjector();
+  const autoPaste = new AutoPaste({ forceInjectionEnabled: true, createInjector: () => injector });
+
+  const target = await autoPaste.captureFrontmostApp();
+
+  assert.equal(JSON.parse(target).process, "notepad");
+  assert.deepEqual(injector.calls, [["getForegroundWindow"]]);
+});
+
+test("0.6.3: 快速粘贴发的是常驻进程的 Ctrl+V", async () => {
+  const injector = makeInputProcessInjector();
+  const autoPaste = new AutoPaste({ forceInjectionEnabled: true, createInjector: () => injector });
+
+  const result = await autoPaste.pasteToAppFast(null);
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(injector.calls, [["pressPaste"]]);
+});
+
+test("0.6.3: 逐字注入被禁用后，Ctrl+V 仍然走常驻进程", async () => {
+  // 受保护输入框吃不下 SendInput 的字符，不代表连 Ctrl+V 都发不出去；
+  // 若这里回落到 execPowerShell，慢机上每次上屏又会多出几秒。
+  const injector = makeInputProcessInjector({ appendOk: false });
+  const autoPaste = new AutoPaste({ forceInjectionEnabled: true, createInjector: () => injector });
+
+  assert.equal(await autoPaste.injectAppendText("x"), false);
+  assert.equal((await autoPaste.pasteToAppFast(null)).ok, true);
+  assert.deepEqual(injector.calls, [["append", "x"], ["pressPaste"]]);
+});
+
+test("0.6.3: 预热把进程启动与 Add-Type 编译挪到开机", async () => {
+  const injector = makeInputProcessInjector();
+  const autoPaste = new AutoPaste({ forceInjectionEnabled: true, createInjector: () => injector });
+
+  assert.equal(await autoPaste.warmupInjector(), true);
+  assert.deepEqual(injector.calls, [["warmup"]]);
 });

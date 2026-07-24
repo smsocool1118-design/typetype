@@ -12,6 +12,7 @@ export interface LocalPunctuationEngineOptions {
   modelDir?: string;
   onnxRuntimeNativeDir?: string;
   onnxRuntimeLoader?: OnnxRuntimeLoader;
+  computeBackend?: 'auto' | 'gpu' | 'cpu';
 }
 
 export interface LocalPunctuationRestoreOptions {
@@ -295,9 +296,10 @@ export class LocalPunctuationEngine {
     const tokenizerConfig = JSON.parse(fs.readFileSync(path.join(modelDir, TOKENIZER_CONFIG_JSON), 'utf8'));
     this.tokenizer = new Tokenizer(tokenizerJson, tokenizerConfig) as unknown as TokenizerLike;
     this.ort = ort;
-    this.session = await ort.InferenceSession.create(path.join(modelDir, ONNX_MODEL), {
-      executionProviders: ['cpu'],
-    });
+    const modelPath = path.join(modelDir, ONNX_MODEL);
+    // 标点模型很小，CPU 又快又稳；DirectML 首次调用有 ~2s 编译预热坑，会把标点预算耗超时导致标点消失。
+    // 故一律用 CPU（配合启动时 warmup 预热 session，首次真实调用即已就绪）。
+    this.session = await ort.InferenceSession.create(modelPath, { executionProviders: ['cpu'] });
     this.lastError = null;
     this.lastRawError = null;
   }

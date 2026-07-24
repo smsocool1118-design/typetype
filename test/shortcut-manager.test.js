@@ -218,10 +218,58 @@ test("ShortcutManager exposes Windows dictation and translation shortcuts", () =
 
   assert.equal(values.includes("CtrlSlash"), true);
   assert.equal(values.includes("CtrlDot"), true);
+  assert.equal(values.includes("CtrlAltSpace"), true);
+  assert.equal(values.includes("DoubleCtrl"), true);
   assert.equal(values.includes("AltDictation"), true);
   assert.equal(values.includes("AltTranslation"), true);
   assert.equal(values.includes("F8"), true);
   assert.equal(values.includes("F9"), true);
+  assert.equal(values.includes("F10"), true);
+});
+
+test("DoubleCtrl is a native hotkey that registers F10 as its globalShortcut fallback", () => {
+  if (process.platform !== "win32") {
+    return;
+  }
+
+  const calls = [];
+  const { ShortcutManager } = loadShortcutManagerWithMock({
+    register(accelerator) { calls.push(accelerator); return true; },
+    unregister() {},
+    isRegistered() { return false; },
+  });
+  const manager = new ShortcutManager();
+
+  assert.equal(manager.isNativeHotkey("DoubleCtrl"), true);
+  assert.equal(manager.register("voice_ask", "DoubleCtrl", () => {}), true);
+  // 双击 Ctrl 无 accelerator（原生），只有 F10 兜底进 globalShortcut。
+  assert.deepEqual(calls, ["F10"]);
+  assert.equal(manager.getCurrentHotkey("voice_ask"), "DoubleCtrl,F10");
+});
+
+test("ShortcutManager physical test confirms a real trigger without starting the action", async () => {
+  const handlers = new Map();
+  let actionCalls = 0;
+  const globalShortcutMock = {
+    register(accelerator, handler) {
+      handlers.set(accelerator, handler);
+      return true;
+    },
+    unregister() {},
+    isRegistered() { return false; },
+  };
+  const { ShortcutManager } = loadShortcutManagerWithMock(globalShortcutMock);
+  const manager = new ShortcutManager();
+  assert.equal(manager.register("voice_ask", "CtrlAltSpace", () => { actionCalls += 1; }), true);
+
+  const resultPromise = manager.waitForPhysicalTrigger("voice_ask", 1000);
+  handlers.get("Control+Alt+Space")();
+  const result = await resultPromise;
+
+  assert.equal(result.ok, true);
+  assert.equal(result.triggered, true);
+  assert.equal(actionCalls, 0);
+  assert.ok(manager.getLastTriggeredAt("voice_ask") > 0);
 });
 
 test("ShortcutManager keeps legacy right Alt hotkey values working", () => {
@@ -249,5 +297,37 @@ test("ShortcutManager keeps legacy right Alt hotkey values working", () => {
   assert.equal(manager.register("translation", `${legacyPrefix}Translation`, () => {}), true);
   assert.equal(manager.getCurrentHotkey("dictation"), "AltDictation,F8");
   assert.equal(manager.getCurrentHotkey("translation"), "AltTranslation,F9");
-  assert.deepEqual(calls, ["AltGr", "F8", "AltGr+Shift", "F9"]);
+  // 右 Alt 由原生键盘钩子驱动，不再向 Electron 注册无效的 AltGr accelerator；
+  // 只有 F8/F9 兜底键进入 globalShortcut。
+  assert.deepEqual(calls, ["F8", "F9"]);
+});
+
+test("ShortcutManager falls back to F8 when the primary accelerator is rejected by Electron", () => {
+  if (process.platform !== "win32") {
+    return;
+  }
+
+  const calls = [];
+  const globalShortcutMock = {
+    register(accelerator) {
+      calls.push(accelerator);
+      // 模拟 Electron 对某个 accelerator 抛出 TypeError（历史上的 AltGr 场景）。
+      if (accelerator === "Control+/") {
+        throw new TypeError("Error processing argument at index 0, conversion failure");
+      }
+      return true;
+    },
+    unregister() {},
+    isRegistered() {
+      return false;
+    },
+  };
+
+  const { ShortcutManager } = loadShortcutManagerWithMock(globalShortcutMock);
+  const manager = new ShortcutManager();
+
+  // 主键 Control+/ 抛异常，不能连累 F8 兜底注册。
+  assert.equal(manager.register("dictation", "CtrlSlash", () => {}), true);
+  assert.deepEqual(calls, ["Control+/", "F8"]);
+  assert.equal(manager.getCurrentHotkey("dictation"), "F8");
 });

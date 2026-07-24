@@ -1,0 +1,99 @@
+{
+  "appId": "app.typetype",
+  "productName": "typetype",
+  "electronDist": "vendor/electron-arm64/dist",
+  "npmRebuild": false,
+  "afterPack": "scripts/after-pack-rcedit.cjs",
+  "directories": {
+    "output": "release"
+  },
+  "asarUnpack": [
+    "node_modules/sherpa-onnx-node/**/*",
+    "node_modules/sherpa-onnx-win-x64/**/*",
+    "node_modules/sherpa-onnx-win-arm64/**/*",
+    "node_modules/onnxruntime-node/**/*",
+    "node_modules/uiohook-napi/**/*",
+    "node_modules/node-gyp-build/**/*"
+  ],
+  "files": [
+    "src/**/*",
+    "dist/**/*",
+    "dist-electron/**/*",
+    "node_modules/sherpa-onnx-win-arm64/**/*",
+    {
+      "from": "resources",
+      "to": "resources",
+      "filter": [
+        "**/*",
+        "!models/**",
+        "!punctuation-models/**",
+        "!translation-models/**",
+        "!runtimes/**",
+        "!runtime-installers/**"
+      ]
+    }
+  ],
+  "extraResources": [
+    {
+      "from": "resources/models",
+      "to": "models",
+      "filter": [
+        "**/*",
+        "!**/README.md",
+        "!**/test_wavs",
+        "!**/test_wavs/**",
+        "!sherpa-onnx-streaming-zipformer-*/**",
+        "!sherpa-onnx-streaming-paraformer-*/**"
+      ]
+    },
+    {
+      "from": "resources/punctuation-models",
+      "to": "punctuation-models",
+      "filter": [
+        "**/*"
+      ]
+    },
+    {
+      "from": "resources/translation-models",
+      "to": "translation-models",
+      "filter": [
+        "**/*"
+      ]
+    },
+    {
+      "from": "resources/runtimes",
+      "to": "runtimes",
+      "filter": [
+        "**/*"
+      ]
+    },
+    {
+      "from": "resources/runtime-installers",
+      "to": "runtime-installers",
+      "filter": [
+        "**/*"
+      ]
+    }
+  ],
+  "win": {
+    "target": [
+      "nsis"
+    ],
+    "signAndEditExecutable": false,
+    "electronLanguages": [
+      "zh-CN",
+      "en-US"
+    ],
+    "icon": "resources/icon.ico",
+    "extraFiles": [
+      {
+        "from": "vendor/electron-arm64/dist/ffmpeg.dll",
+        "to": "."
+      }
+    ]
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true
+  }
+}

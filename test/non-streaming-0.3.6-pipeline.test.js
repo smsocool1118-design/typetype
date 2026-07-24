@@ -19,7 +19,10 @@ test("non-streaming first output uses local quality pipeline and does not wait f
   assert.equal(body.includes("runNonStreamingBackgroundRefineIfNeeded("), true);
   assert.equal(body.includes("default_output_waits_for_llm: false"), true);
   assert.equal(body.includes("await this.rewriteWithLlm(cleanedTranscript)"), false);
-  assert.match(source, /const NON_STREAMING_PUNCTUATION_TIMEOUT_MS = \d+;/);
+  // 语义标点预算改为按文本长度动态计算（helper 移到 transcript-punctuation.ts 便于测试）。
+  assert.equal(source.includes("nonStreamingPunctuationBudgetMs("), true);
+  const punctSource = readProjectFile("electron/transcript-punctuation.ts");
+  assert.match(punctSource, /export function nonStreamingPunctuationBudgetMs/);
 });
 
 test("non-streaming transcription no longer has a fixed thinking lead-in", () => {

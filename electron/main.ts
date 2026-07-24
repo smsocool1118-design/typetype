@@ -13,16 +13,19 @@ import {
 } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { spawnSync } from 'child_process';
+import { getDefaultNumThreads, getRuntimeArchInfo } from './asr-runtime';
 
 import { StateMachine } from './state-machine';
 import { SettingsStore } from './settings-store';
 import { AudioRecorder } from './audio-recorder';
 import { AsrEngine } from './asr-engine';
-import { AutoPaste } from './auto-paste';
+import { AutoPaste, FOREGROUND_RESTORE_DELAY_MS } from './auto-paste';
 import { TrayManager, trayStatusForRuntimeStatus } from './tray';
 import { OverlayWindow } from './overlay';
 import { ShortcutManager } from './shortcut-manager';
+import { NativeHotkeyManager, PushToTalkIntent } from './native-hotkey-manager';
 import { registerIpcHandlers } from './ipc-handlers';
 import { getLogFilePath, getLogDirectory, installFileLogger } from './logger';
 import { canStopRecording, RECORDING_STOP_GUARD_MS } from './recording-toggle';
@@ -32,16 +35,29 @@ import {
   UiSnapshot,
   SettingsViewData,
   Settings,
+  LlmRewriteConfig,
   AsrDiagnostics,
   CaptureIntent,
   DictionaryEntry,
   DictionaryImportPreview,
+  IndustryTermStats,
+  IndustryTermImportResult,
   DictionaryImportRequest,
   DictionaryViewData,
   PreloadStatusView,
+  PreloadResourceView,
   StreamingAiPanelState,
   RewriteScenario,
   RuntimeStatus,
+  DictionaryProbeResult,
+  IndustryPackId,
+  OfficePanelMode,
+  OfficeTemplateCatalog,
+  OfficeHistoryItem,
+  OfficeWorkspaceResult,
+  OfficeWorkspaceSource,
+  ShortcutTestResult,
+  VoiceAskState,
 } from './types';
 import { getAvailableMicrophones } from './microphones';
 import { initializeAsrEngine } from './asr-bootstrap';
@@ -55,12 +71,13 @@ import {
 } from './translation-model-registry';
 import { getRewriteScenarioLabel, getRewriteScenarioPrompt, testLlmConnection } from './llm-rewrite';
 import { rewriteWithPreferredLlm } from './llm-route';
+import { buildOfficialDocxBuffer } from './docx-export';
 import { StreamingSegmenter, StreamingSegmentEvent } from './streaming-segmentation';
 import { ensureStreamingFinalPunctuation, prefixStreamingBoundaryPunctuation } from './streaming-punctuation';
-import { applyBasicTranscriptPunctuation } from './transcript-punctuation';
+import { applyBasicTranscriptPunctuation, nonStreamingPunctuationBudgetMs } from './transcript-punctuation';
 import { applyVoiceFormattingCommands } from './transcript-formatting';
 import { DictionaryStore } from './dictionary-store';
-import { createDictionaryImportPreview } from './dictionary-import';
+import { createDictionaryImportPreview, parseDictionaryCandidates } from './dictionary-import';
 import { parseStreamingAiResult, sanitizeStreamingAiText } from './streaming-ai-text';
 import { buildLocalRewritePromptContext, LocalChineseRewriteResult, rewriteChineseLocally } from './local-chinese-rewrite';
 import { LocalPunctuationEngine, LocalPunctuationRestoreResult } from './local-punctuation-engine';
@@ -76,6 +93,21 @@ import {
   StreamingRealtimeTextProcessor,
   StreamingTailCorrection,
 } from './streaming-realtime-text-processor';
+import { DictionaryDiagnostics } from './dictionary-diagnostics';
+import {
+  COMMON_OFFICE_TERMS,
+  findPendingPlaceholders,
+  getIndustryLexiconCategories,
+  getIndustryPack,
+  getOfficeTemplateCatalog,
+  matchIndustryTerms,
+} from './office-template-registry';
+import { CustomIndustryStore } from './custom-industry-store';
+import { PinyinCorrectionEngine } from './pinyin-correction-engine';
+import { runVoiceAsk } from './voice-ask-engine';
+import { OfficeHistoryStore } from './office-history-store';
+import { ConversationStore, selectHistoryForPrompt } from './conversation-store';
+import { readOfficeFile } from './office-file-reader';
 
 const FEEDBACK_EMAIL = 'feedback@typetype.app';
 const WINDOWS_LOGIN_ITEM_NAME = 'typetype';
@@ -94,11 +126,20 @@ const STREAMING_PASTE_STARTUP_WINDOW_CHARS = 36;
 const STREAMING_PANEL_THROTTLE_MS = 100;
 const STREAMING_AUDIO_CACHE_SECONDS = 120;
 const STREAMING_TAIL_CORRECTION_MIN_INTERVAL_MS = 500;
+// 逐段"带标点上屏"的等待预算：超过就先上原文，不让本地断句模型拖住出字。
+const STREAMING_SEGMENT_REFINE_BUDGET_MS = 700;
+const INDUSTRY_TERMS_DIALOG_OPTIONS: Electron.OpenDialogOptions = {
+  title: '选择本行业专业词表',
+  properties: ['openFile'],
+  filters: [
+    { name: '词表文件', extensions: ['txt', 'csv', 'xlsx', 'xls', 'docx'] },
+    { name: '全部文件', extensions: ['*'] },
+  ],
+};
 const SHORTCUT_WATCHDOG_INTERVAL_MS = 5000;
 const RECORDER_OPERATION_TIMEOUT_MS = 8000;
 const STOPPED_STALE_TIMEOUT_MS = 2000;
 const TRANSCRIPTION_STALE_TIMEOUT_MS = 90000;
-const NON_STREAMING_PUNCTUATION_TIMEOUT_MS = 260;
 
 interface StreamingCursorCommitState {
   committedText: string;
@@ -128,13 +169,31 @@ interface NonStreamingTimingSnapshot {
   error?: string;
 }
 
+// 运行环境自检：让"为什么这台机器慢"一眼可见（x64 包跑在 ARM64 设备上会走模拟层）。
+function buildRuntimeStatusView(): PreloadResourceView {
+  const cpus = os.cpus();
+  const info = getRuntimeArchInfo(process.arch, cpus[0]?.model ?? '');
+  const threads = getDefaultNumThreads(cpus.length || 1);
+  const base = `${info.archLabel} · ${cpus.length || '?'} 核 · 识别线程 ${threads}`;
+
+  if (info.emulated) {
+    return {
+      status: 'error',
+      label: '运行环境',
+      detail: `${base}。当前为 x64 版本，正在模拟层运行，语音出字会明显变慢；请改用 ARM64 版本安装包。`,
+    };
+  }
+  return { status: 'ready', label: '运行环境', detail: `${base}。` };
+}
+
 function defaultPreloadStatus(): PreloadStatusView {
   return {
+    runtime: buildRuntimeStatusView(),
     asr: { status: 'warming', label: '识别引擎', detail: '正在后台预热识别引擎。' },
     punctuation: { status: 'warming', label: '本地断句增强', detail: '正在后台检查本地断句增强能力。' },
     translation: { status: 'warming', label: '翻译资源', detail: '正在检查本地翻译资源。' },
     dictionary: { status: 'warming', label: '词典索引', detail: '正在加载本地词典。' },
-    llm: { status: 'not_configured', label: 'LLM 配置', detail: '未启用 LLM 润写。' },
+    llm: { status: 'not_configured', label: '国产 AI 配置', detail: '未启用国产 AI 润写。' },
   };
 }
 
@@ -147,8 +206,11 @@ class TypenewApp {
   private trayManager: TrayManager;
   private overlayWindow: OverlayWindow | null = null;
   private shortcutManager: ShortcutManager;
+  private nativeHotkeyManager: NativeHotkeyManager;
+  private nativeHotkeyNote: string | null = null;
   private settingsWindow: BrowserWindow | null = null;
   private streamingAiWindow: BrowserWindow | null = null;
+  private voiceAskWindow: BrowserWindow | null = null;
   private recorderWindow: BrowserWindow | null = null;
   private tray: Tray | null = null;
   private previousAppBundleId: string | null = null;
@@ -208,11 +270,15 @@ class TypenewApp {
     status_text: '流式 AI 整理面板未开启。',
     rewrite_scenario: 'general',
     rewrite_scenario_label: '通用整理',
+    industry_pack: 'general_office',
+    industry_pack_label: '通用办公',
+    panel_mode: 'standard',
     raw_text: '',
     refined_raw_text: '',
     ai_text: '',
     can_apply_refined_raw: false,
     apply_status_text: null,
+    pending_placeholders: [],
     mode_label: '涉密离线模式',
     ai_status_label: '未开始',
     last_review_at: null,
@@ -231,7 +297,10 @@ class TypenewApp {
   private activeCaptureIntent: CaptureIntent = 'dictation';
   private translationEngine: TranslationEngine;
   private dictionaryStore: DictionaryStore;
+  private dictionaryDiagnostics: DictionaryDiagnostics;
+  private officeHistoryStore: OfficeHistoryStore;
   private codeSwitchLexicon: CodeSwitchLexicon;
+  private pinyinCorrectionEngine: PinyinCorrectionEngine;
   private aiRewriteGate: AiRewriteGate;
   private localPunctuationEngine: LocalPunctuationEngine;
   private semanticPunctuationEngine: SemanticPunctuationEngine;
@@ -250,6 +319,23 @@ class TypenewApp {
   private runtimeStatusSince = Date.now();
   private lastNonStreamingTiming: NonStreamingTimingSnapshot | null = null;
   private lastNonStreamingRefinedText = '';
+  private voiceAskContextText = '';
+  private voiceAskState: VoiceAskState = {
+    conversation_id: null,
+    conversations: [],
+    messages: [],
+    active: false,
+    status: 'idle',
+    question: '',
+    context_text: '',
+    answer: '',
+    action: 'answer',
+    error: null,
+    needs_llm_config: false,
+    updated_at: null,
+  };
+  private conversationStore!: ConversationStore;
+  private customIndustryStore!: CustomIndustryStore;
 
   constructor() {
     this.settingsStore = new SettingsStore();
@@ -258,14 +344,29 @@ class TypenewApp {
     this.streamingInsertionTransaction = new TextInsertionTransaction(this.autoPaste);
     this.trayManager = new TrayManager(this.getResourcesPath());
     this.shortcutManager = new ShortcutManager();
+    this.nativeHotkeyManager = new NativeHotkeyManager();
     this.dictionaryStore = new DictionaryStore({
       dataDir: this.getDataDir(),
       resourcesPath: this.getResourcesPath(),
       legacyCustomDictionary: this.settingsStore.getSettings().custom_dictionary,
     });
+    this.officeHistoryStore = new OfficeHistoryStore(this.getDataDir());
+    this.conversationStore = new ConversationStore(this.getDataDir());
+    this.customIndustryStore = new CustomIndustryStore(this.getDataDir());
     this.codeSwitchLexicon = new CodeSwitchLexicon({
       dataDir: this.getDataDir(),
       resourcesPath: this.getResourcesPath(),
+    });
+    this.pinyinCorrectionEngine = new PinyinCorrectionEngine({
+      getTerms: () => this.buildPinyinCorrectionTerms(),
+      isEnabled: () => this.settingsStore.getSettings().pinyin_correction_enabled,
+    });
+    this.dictionaryDiagnostics = new DictionaryDiagnostics({
+      getPersonalEntries: () => this.dictionaryStore.getEntries(),
+      getSystemEntries: () => this.dictionaryStore.getSystemLexicon(),
+      applyDictionary: (text) =>
+        this.pinyinCorrectionEngine.applyToText(this.dictionaryStore.applyToText(text)).text,
+      applyCodeSwitch: (text) => this.codeSwitchLexicon.applyToText(text),
     });
     this.aiRewriteGate = new AiRewriteGate();
     this.textNormalizationEngine = new TextNormalizationEngine();
@@ -274,7 +375,11 @@ class TypenewApp {
     });
     this.streamingRealtimeTextProcessor = new StreamingRealtimeTextProcessor({
       textNormalizationEngine: this.textNormalizationEngine,
-      applyDictionary: (text, options) => this.dictionaryStore.applyToText(text, options),
+      applyDictionary: (text, options) =>
+        this.pinyinCorrectionEngine.applyToText(
+          this.dictionaryStore.applyToText(text, options),
+          { partial: options.partial }
+        ).text,
       applyCodeSwitch: (text, options) => this.codeSwitchLexicon.applyToText(text, options),
     });
     this.runtimeDependencyManager = new RuntimeDependencyManager({
@@ -298,11 +403,18 @@ class TypenewApp {
       resourcesPath: this.getResourcesPath(),
       processResourcesPath: process.resourcesPath,
       appPath: app.getAppPath(),
+      // GPU 可用时用 DirectML 跑标点模型提速；失败自动回退 CPU。
+      computeBackend: this.settingsStore.getSettings().compute_backend,
     });
     this.semanticPunctuationEngine = new SemanticPunctuationEngine(
       this.localPunctuationEngine,
       this.codeSwitchLexicon
     );
+
+    const initialSettings = this.settingsStore.getSettings();
+    this.streamingAiState.industry_pack = initialSettings.active_industry_pack;
+    this.streamingAiState.industry_pack_label = getIndustryPack(initialSettings.active_industry_pack).name;
+    this.streamingAiState.panel_mode = initialSettings.office_panel_mode;
 
     this.setupApp();
   }
@@ -323,6 +435,13 @@ class TypenewApp {
     return resourcesPaths[0];
   }
 
+  // 各窗口的红色 type 图标（否则 dev 下任务栏/窗口显示 Electron 默认原子图标）。
+  private getWindowIconPath(): string {
+    const base = this.getResourcesPath();
+    const ico = path.join(base, 'icon.ico');
+    return fs.existsSync(ico) ? ico : path.join(base, 'icon.png');
+  }
+
   private getDataDir(): string {
     return this.settingsStore.getDataDir();
   }
@@ -335,6 +454,7 @@ class TypenewApp {
     codeSwitchTerms: string[];
     dictionaryTerms: string[];
     systemTerms: string[];
+    industryTerms: string[];
   } {
     const dictionaryTerms = this.dictionaryStore
       .getEntries()
@@ -343,31 +463,59 @@ class TypenewApp {
     const systemTerms = this.dictionaryStore
       .getSystemLexicon()
       .map((entry) => entry.term);
+    // 当前行业模板的术语一起进入热词偏置，选"监狱"就把狱政管理科等词喂给 ASR。
+    const industryTerms = getIndustryPack(this.settingsStore.getSettings().active_industry_pack).lexicon;
 
     return {
       codeSwitchTerms: this.codeSwitchLexicon.getHotwordTerms(5000),
       dictionaryTerms,
       systemTerms,
+      industryTerms,
     };
+  }
+
+  // 同音纠错词表：启用的个人词条（含别名）+ 当前行业模板术语（剔除通用办公词，避免过度纠错）。
+  private buildPinyinCorrectionTerms(): Array<{ term: string; source: 'personal' | 'industry' }> {
+    const personal = this.dictionaryStore
+      .getEntries()
+      .filter((entry) => entry.enabled)
+      .flatMap((entry) => [entry.term, entry.replacement, ...entry.aliases])
+      .filter((term) => Boolean(term && term.trim()))
+      .map((term) => ({ term, source: 'personal' as const }));
+
+    const commonTerms = new Set(COMMON_OFFICE_TERMS);
+    const industry = getIndustryPack(this.settingsStore.getSettings().active_industry_pack)
+      .lexicon.filter((term) => !commonTerms.has(term))
+      .map((term) => ({ term, source: 'industry' as const }));
+
+    return [...personal, ...industry];
+  }
+
+  private refreshPinyinCorrectionTerms(): void {
+    this.pinyinCorrectionEngine.refreshTerms();
   }
 
   private saveDictionaryEntry(entry: Partial<DictionaryEntry>): DictionaryViewData {
     this.dictionaryStore.saveEntry(entry);
+    this.refreshPinyinCorrectionTerms();
     return this.dictionaryStore.getViewData();
   }
 
   private deleteDictionaryEntry(id: string): DictionaryViewData {
     this.dictionaryStore.deleteEntry(id);
+    this.refreshPinyinCorrectionTerms();
     return this.dictionaryStore.getViewData();
   }
 
   private setDictionaryEntryEnabled(id: string, enabled: boolean): DictionaryViewData {
     this.dictionaryStore.setEntryEnabled(id, enabled);
+    this.refreshPinyinCorrectionTerms();
     return this.dictionaryStore.getViewData();
   }
 
   private promoteAutoLearnedEntry(id: string): DictionaryViewData {
     this.dictionaryStore.promoteAutoLearnedEntry(id);
+    this.refreshPinyinCorrectionTerms();
     return this.dictionaryStore.getViewData();
   }
 
@@ -384,7 +532,9 @@ class TypenewApp {
   }
 
   private commitDictionaryImport(preview: DictionaryImportPreview): DictionaryViewData {
-    return this.dictionaryStore.commitImportPreview(preview);
+    const view = this.dictionaryStore.commitImportPreview(preview);
+    this.refreshPinyinCorrectionTerms();
+    return view;
   }
 
   private async selectDictionaryImportFile(): Promise<DictionaryImportPreview | null> {
@@ -411,6 +561,65 @@ class TypenewApp {
     });
   }
 
+  /** 当前行业包的词表概况：内置词 / 大词库可借类目 / 用户自建词。 */
+  private getIndustryTermStats(): IndustryTermStats {
+    const settings = this.settingsStore.getSettings();
+    const industryId = settings.active_industry_pack;
+    const pack = getIndustryPack(industryId);
+    const categories = getIndustryLexiconCategories(industryId);
+    return {
+      industry_id: industryId,
+      industry_name: pack.name,
+      builtin_count: pack.lexicon.length,
+      custom_count: this.customIndustryStore.getTerms(industryId).length,
+      lexicon_categories: categories,
+    };
+  }
+
+  private async importIndustryTerms(): Promise<IndustryTermImportResult> {
+    const stats = this.getIndustryTermStats();
+    const result = await this.withDialogWindow((parent) => (parent
+      ? dialog.showOpenDialog(parent, INDUSTRY_TERMS_DIALOG_OPTIONS)
+      : dialog.showOpenDialog(INDUSTRY_TERMS_DIALOG_OPTIONS)));
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return { ok: false, canceled: true, added: 0, skipped: 0, stats };
+    }
+
+    try {
+      const candidates = await parseDictionaryCandidates({
+        file_path: result.filePaths[0],
+        file_name: path.basename(result.filePaths[0]),
+      });
+      // 导入的是"要保护的专业词"，所以取每条的目标词形（有替换目标就用目标词）。
+      const terms = candidates.map((candidate) => candidate.replacement || candidate.term);
+      const merged = this.customIndustryStore.addTerms(stats.industry_id, terms);
+      this.publishSettingsViewData();
+      return {
+        ok: true,
+        canceled: false,
+        added: merged.added,
+        skipped: merged.skipped,
+        stats: this.getIndustryTermStats(),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        canceled: false,
+        added: 0,
+        skipped: 0,
+        stats,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  private clearIndustryTerms(): IndustryTermStats {
+    this.customIndustryStore.clear(this.settingsStore.getSettings().active_industry_pack);
+    this.publishSettingsViewData();
+    return this.getIndustryTermStats();
+  }
+
   private async exportDictionary(): Promise<{ ok: boolean; path?: string }> {
     const options: Electron.SaveDialogOptions = {
       title: '导出个人词典',
@@ -431,9 +640,288 @@ class TypenewApp {
     return { ok: true, path: result.filePath };
   }
 
+  private getOfficeCatalog(): OfficeTemplateCatalog {
+    return getOfficeTemplateCatalog();
+  }
+
+  private probeDictionary(text: string, industryPack: IndustryPackId): DictionaryProbeResult {
+    return this.dictionaryDiagnostics.probe(text, industryPack || this.settingsStore.getSettings().active_industry_pack);
+  }
+
+  private testShortcut(actionId: 'dictation' | 'translation' | 'voice_ask'): Promise<ShortcutTestResult> {
+    return this.shortcutManager.waitForPhysicalTrigger(actionId, 8000);
+  }
+
+  private setOfficePanelMode(mode: OfficePanelMode): StreamingAiPanelState {
+    const settings = this.settingsStore.getSettings();
+    settings.office_panel_mode = mode;
+    this.settingsStore.saveSettings(settings);
+    this.stateMachine.applySettings(settings);
+    this.streamingAiState.panel_mode = mode;
+    this.resizeStreamingAiWindow(mode);
+    this.publishStreamingAiPanelState();
+    this.publishSettingsViewData();
+    return this.getStreamingAiPanelState();
+  }
+
+  private setIndustryPack(industryPack: IndustryPackId): StreamingAiPanelState {
+    const pack = getIndustryPack(industryPack);
+    const settings = this.settingsStore.getSettings();
+    settings.active_industry_pack = pack.id;
+    this.settingsStore.saveSettings(settings);
+    this.stateMachine.applySettings(settings);
+    this.patchStreamingAiPanelState({
+      industry_pack: pack.id,
+      industry_pack_label: pack.name,
+      status_text: `已切换为${pack.name}行业包。`,
+    }, { immediate: true });
+    if (this.streamingAiState.raw_text) {
+      this.setStreamingAiScenario(this.streamingRewriteScenario);
+    }
+    this.refreshPinyinCorrectionTerms();
+    this.reinitAsrEngineForHotwordsIfIdle();
+    this.publishSettingsViewData();
+    return this.getStreamingAiPanelState();
+  }
+
+  // 切换行业模板后，若当前引擎支持底层热词（仅中文高精度流式）且不在录音中，
+  // 重新初始化引擎以带上新模板的热词；离线 SenseVoice 无底层热词，靠拼音纠错覆盖，跳过重建。
+  private reinitAsrEngineForHotwordsIfIdle(): void {
+    const status = this.stateMachine.getStatus();
+    if (status !== 'idle' && status !== 'done' && status !== 'stopped') {
+      return;
+    }
+    if (!this.asrEngine?.getHotwordStatus().supported) {
+      return;
+    }
+    this.asrEngine = null;
+    this.primeAsrEngine();
+  }
+
+  private processOfficeWorkspaceText(
+    rawText: string,
+    source: OfficeWorkspaceSource,
+    title: string
+  ): OfficeWorkspaceResult {
+    const settings = this.getStreamingRewriteSettings(this.settingsStore.getSettings());
+    const cleaned = this.cleanupTranscriptWithDictionary(stripUnknownTokens(rawText), settings);
+    if (!cleaned) {
+      return { ok: false, message: '没有检测到可整理的文字。', state: this.getStreamingAiPanelState() };
+    }
+    const localRewrite = this.buildLocalChineseRewrite(cleaned, settings, true);
+    this.patchStreamingAiPanelState({
+      enabled: true,
+      active: true,
+      status: 'ready',
+      status_text: `${title}已整理，可继续选择模板或行业包。`,
+      rewrite_scenario: settings.rewrite_scenario,
+      rewrite_scenario_label: getRewriteScenarioLabel(settings.rewrite_scenario),
+      raw_text: cleaned,
+      refined_raw_text: sanitizeStreamingAiText(localRewrite.refinedRawText) || cleaned,
+      ai_text: sanitizeStreamingAiText(localRewrite.structuredText) || cleaned,
+      can_apply_refined_raw: false,
+      apply_status_text: null,
+      mode_label: '办公工作台',
+      ai_status_label: '本地整理完成',
+      last_review_at: new Date().toISOString(),
+      last_error: null,
+    }, { immediate: true });
+    this.showStreamingAiPanel(true);
+    const historyItem = this.officeHistoryStore.add({
+      source,
+      title,
+      templateId: settings.rewrite_scenario,
+      industryPack: settings.active_industry_pack,
+      text: cleaned,
+    });
+    return {
+      ok: true,
+      message: `${title}已整理。`,
+      state: this.getStreamingAiPanelState(),
+      history_item: historyItem,
+    };
+  }
+
+  private organizeClipboardText(): OfficeWorkspaceResult {
+    return this.processOfficeWorkspaceText(clipboard.readText(), 'clipboard', '剪贴板内容');
+  }
+
+  private async organizeSelectedText(): Promise<OfficeWorkspaceResult> {
+    const target = this.previousAppBundleId && !this.isTypetypeWindowTarget(this.previousAppBundleId)
+      ? this.previousAppBundleId
+      : null;
+    const selectedText = await this.autoPaste.captureSelectedText(target);
+    return this.processOfficeWorkspaceText(selectedText, 'selection', '选中文本');
+  }
+
+  private async importOfficeFile(): Promise<OfficeWorkspaceResult> {
+    const options: Electron.OpenDialogOptions = {
+      title: '选择要整理的办公文件',
+      properties: ['openFile'],
+      filters: [
+        { name: '办公文件', extensions: ['docx', 'txt', 'md', 'xlsx', 'xls', 'csv', 'tsv'] },
+        { name: '全部文件', extensions: ['*'] },
+      ],
+    };
+    // 办公文件导入也是从 AI 面板发起的，同样要避开面板置顶遮挡。
+    const result = await this.withDialogWindow((parent) => (
+      parent ? dialog.showOpenDialog(parent, options) : dialog.showOpenDialog(options)
+    ));
+    if (result.canceled || result.filePaths.length === 0) {
+      return { ok: false, message: '已取消文件整理。', state: this.getStreamingAiPanelState() };
+    }
+    const file = await readOfficeFile(result.filePaths[0]);
+    return this.processOfficeWorkspaceText(file.text, 'file', file.file_name);
+  }
+
+  private getOfficeHistory(): OfficeHistoryItem[] {
+    return this.officeHistoryStore.list();
+  }
+
+  private clearOfficeHistory(): OfficeHistoryItem[] {
+    this.officeHistoryStore.clear();
+    return [];
+  }
+
+  // 一键导出标准公文 Word（GB/T 9704 版式）：默认导出面板当前显示的整理稿。
+  private async exportOfficeDocx(
+    payload: { title?: string; content?: string } = {}
+  ): Promise<{ ok: boolean; path?: string; error?: string }> {
+    const content = (payload.content || '').trim()
+      || sanitizeStreamingAiText(this.streamingAiState.ai_text || this.streamingAiState.refined_raw_text || '').trim();
+    if (!content) {
+      return { ok: false, error: '没有可导出的内容，请先完成一次语音整理。' };
+    }
+    const title = (payload.title || '').trim() || '语音整理稿';
+    const safeTitle = title.replace(/[\\/:*?"<>|]/g, '-').slice(0, 40);
+    const now = new Date();
+    const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
+
+    const saveOptions = {
+      title: '导出公文 Word',
+      defaultPath: path.join(app.getPath('documents'), `${safeTitle}-${stamp}.docx`),
+      filters: [{ name: 'Word 文档', extensions: ['docx'] }],
+    };
+    const saveResult = await this.withDialogWindow((parent) => (
+      parent ? dialog.showSaveDialog(parent, saveOptions) : dialog.showSaveDialog(saveOptions)
+    ));
+    if (saveResult.canceled || !saveResult.filePath) {
+      return { ok: false };
+    }
+
+    try {
+      const buffer = await buildOfficialDocxBuffer({ title, content });
+      fs.writeFileSync(saveResult.filePath, buffer);
+      shell.showItemInFolder(saveResult.filePath);
+      return { ok: true, path: saveResult.filePath };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('Export office docx failed:', message);
+      return { ok: false, error: `导出失败：${message}` };
+    }
+  }
+
+  // 一键汇总近 7 天办公记录成周报草稿：本地规则先出骨架，配置了国产 AI 时再润成正式周报。
+  private async generateWeeklyReport(): Promise<StreamingAiPanelState> {
+    const settings = this.settingsStore.getSettings();
+    if (!settings.office_history_enabled) {
+      this.patchStreamingAiPanelState({
+        apply_status_text: '已关闭"记录办公历史"，本周汇总不可用；如需使用请在设置中开启。',
+      }, { immediate: true });
+      return this.getStreamingAiPanelState();
+    }
+    const weekAgoMs = Date.now() - 7 * 24 * 3600 * 1000;
+    const items = this.officeHistoryStore.list(100)
+      .filter((item) => {
+        const at = new Date(item.created_at).getTime();
+        return Number.isFinite(at) && at >= weekAgoMs;
+      })
+      .reverse();
+
+    if (items.length === 0) {
+      this.patchStreamingAiPanelState({
+        apply_status_text: '近 7 天没有可汇总的办公记录；先用语音完成几段工作内容再来汇总。',
+      }, { immediate: true });
+      return this.getStreamingAiPanelState();
+    }
+
+    this.patchStreamingAiPanelState({
+      status_text: `正在汇总近 7 天 ${items.length} 条记录…`,
+    }, { immediate: true });
+
+    const digest = items.map((item) => {
+      const day = new Date(item.created_at);
+      const stamp = `${day.getMonth() + 1}月${day.getDate()}日`;
+      const body = (item.text_full || item.text_preview || '').trim();
+      return `【${stamp} · ${item.title}】\n${body}`;
+    }).join('\n\n');
+
+    // 本地骨架：按"工作汇报"场景结构化（进展/问题/下一步），离线可用。
+    const localReport = this.buildLocalChineseRewrite(
+      digest,
+      { ...settings, rewrite_scenario: 'work_report' },
+      true
+    );
+    let report = localReport.structuredText || localReport.refinedRawText || digest;
+
+    // 配置了国产 AI 时润成正式周报（失败静默回落本地骨架）。
+    if (settings.llm_rewrite?.enabled && settings.llm_rewrite.api_key?.trim()) {
+      try {
+        const result = await rewriteWithPreferredLlm(
+          `请把以下近一周的办公记录汇总成一份结构化周报，分为：一、本周工作进展；二、存在问题；三、下一步计划。只依据记录内容，不编造事实、数据或日期。\n\n${digest}`,
+          { llm_rewrite: this.getOfficeLlmConfig() },
+          {
+            scenario: 'work_report',
+            industryPack: settings.active_industry_pack,
+          }
+        );
+        if (result.polishedText) {
+          report = sanitizeStreamingAiText(result.polishedText) || report;
+        }
+      } catch (error) {
+        console.warn('Weekly report LLM polish failed; using local skeleton:', error);
+      }
+    }
+
+    this.patchStreamingAiPanelState({
+      ai_text: report,
+      status_text: `本周汇总已生成（${items.length} 条记录）；可一键带入或导出 Word。`,
+      apply_status_text: '',
+    }, { immediate: true });
+    this.showStreamingAiPanel(true);
+    return this.getStreamingAiPanelState();
+  }
+
+  // 每次语音产出计入办公历史（本地存储），供周报/日报汇总使用。
+  private recordVoiceWorkHistory(text: string, settings: Settings): void {
+    // 关闭"记录办公历史"后一个字都不落盘（涉密场景）。
+    if (!settings.office_history_enabled) {
+      return;
+    }
+    const trimmed = (text || '').trim();
+    if (Array.from(trimmed).length < 30) {
+      return;
+    }
+    try {
+      this.officeHistoryStore.add({
+        source: 'voice',
+        title: trimmed.replace(/\s+/g, ' ').slice(0, 24),
+        templateId: settings.rewrite_scenario,
+        industryPack: settings.active_industry_pack,
+        text: trimmed,
+      });
+    } catch (error) {
+      console.warn('Record voice work history failed:', error);
+    }
+  }
+
   private setupApp(): void {
     app.on('before-quit', () => {
       this.isQuitting = true;
+      // 停止原生键盘钩子线程，否则可能拖住进程退出。
+      this.nativeHotkeyManager.disable();
+      // 关闭常驻注入进程。
+      this.autoPaste.disposeInjector();
       if (this.shortcutWatchdogTimer) {
         clearInterval(this.shortcutWatchdogTimer);
         this.shortcutWatchdogTimer = null;
@@ -460,13 +948,7 @@ class TypenewApp {
     }
 
     app.on('second-instance', () => {
-      this.createSettingsWindow();
-      if (this.settingsWindow) {
-        if (this.settingsWindow.isMinimized()) {
-          this.settingsWindow.restore();
-        }
-        this.settingsWindow.focus();
-      }
+      this.showSettingsWindow();
     });
 
     powerMonitor.on('resume', () => {
@@ -502,12 +984,13 @@ class TypenewApp {
       () => this.getSnapshot(),
       () => this.getSettingsViewData(),
       (settings) => this.saveSettings(settings),
-      () => this.showSettingsWindow(),
+      (focus?: string) => this.showSettingsWindow(focus),
       () => this.openAccessibilitySettings(),
       () => this.openMicrophoneSettings(),
       () => this.openInputMonitoringSettings(),
       () => this.openLogDirectory(),
       () => this.openFeedbackEmail(),
+      (providerKey: string) => this.openApiKeyPage(providerKey),
       () => this.runAsrDiagnostics(),
       () => this.installRuntimeDependency(),
       () => this.repairShortcutsAndRecorder(),
@@ -525,6 +1008,32 @@ class TypenewApp {
       (preview) => this.commitDictionaryImport(preview),
       () => this.selectDictionaryImportFile(),
       () => this.exportDictionary(),
+      () => this.getOfficeCatalog(),
+      () => this.organizeClipboardText(),
+      () => this.organizeSelectedText(),
+      () => this.importOfficeFile(),
+      () => this.getOfficeHistory(),
+      () => this.clearOfficeHistory(),
+      (payload) => this.exportOfficeDocx(payload),
+      () => this.generateWeeklyReport(),
+      (mode) => this.setOfficePanelMode(mode),
+      (industryPack) => this.setIndustryPack(industryPack),
+      (text, industryPack) => this.probeDictionary(text, industryPack),
+      () => this.getIndustryTermStats(),
+      () => this.importIndustryTerms(),
+      () => this.clearIndustryTerms(),
+      (actionId) => this.testShortcut(actionId),
+      () => this.getVoiceAskState(),
+      () => this.showVoiceAskPanel(true),
+      () => this.startVoiceAsk(),
+      (question: string) => this.askVoiceQuestionText(question),
+      (action) => this.setVoiceAskAction(action),
+      () => this.createVoiceAskConversation(),
+      (id: string) => this.selectVoiceAskConversation(id),
+      (id: string, title: string) => this.renameVoiceAskConversation(id, title),
+      (id: string) => this.deleteVoiceAskConversation(id),
+      () => this.copyVoiceAskAnswer(),
+      () => this.applyVoiceAskAnswer(),
       () => this.getStreamingAiPanelState(),
       () => this.showStreamingAiPanel(true),
       () => this.clearStreamingAiPanel(),
@@ -633,6 +1142,7 @@ class TypenewApp {
       height: 820,
       show: false,
       title: 'typetype Settings',
+      icon: this.getWindowIconPath(),
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
         contextIsolation: true,
@@ -661,18 +1171,24 @@ class TypenewApp {
 
     const panelPath = path.join(__dirname, '..', 'src', 'streaming-ai', 'index.html');
     const workArea = screen.getPrimaryDisplay().workArea;
-    const width = Math.min(760, Math.max(620, workArea.width - 32));
-    const height = Math.min(500, Math.max(420, workArea.height - 80));
+    const panelMode = this.settingsStore.getSettings().office_panel_mode;
+    const bounds = this.getStreamingPanelSize(panelMode, workArea.width, workArea.height);
+    const { width, height } = bounds;
+    // 迷你竖窗贴右侧、垂直居中偏上，避开屏幕中下方的正文光标区；其它模式仍贴右下。
+    const panelY = panelMode === 'mini'
+      ? workArea.y + Math.max(16, Math.round((workArea.height - height) / 2) - 48)
+      : workArea.y + Math.max(16, workArea.height - height - 72);
 
     this.streamingAiWindow = new BrowserWindow({
       width,
       height,
-      minWidth: 560,
-      minHeight: 380,
+      minWidth: 320,
+      minHeight: 220,
       x: workArea.x + workArea.width - width - 16,
-      y: workArea.y + Math.max(16, workArea.height - height - 72),
+      y: panelY,
       show: false,
       title: 'typetype AI 整理',
+      icon: this.getWindowIconPath(),
       autoHideMenuBar: true,
       alwaysOnTop: true,
       webPreferences: {
@@ -697,10 +1213,196 @@ class TypenewApp {
     });
   }
 
+  private getStreamingPanelSize(mode: OfficePanelMode, workAreaWidth: number, workAreaHeight: number): { width: number; height: number } {
+    if (mode === 'mini') {
+      // 竖长条：原文 + 结构化参考两块竖排，窄而高，不横跨遮挡正文。
+      return {
+        width: Math.min(380, Math.max(320, workAreaWidth - 24)),
+        height: Math.min(600, Math.max(420, workAreaHeight - 96)),
+      };
+    }
+    if (mode === 'workbench') {
+      return {
+        width: Math.min(1040, Math.max(720, workAreaWidth - 32)),
+        height: Math.min(760, Math.max(520, workAreaHeight - 64)),
+      };
+    }
+    return {
+      width: Math.min(760, Math.max(560, workAreaWidth - 32)),
+      height: Math.min(520, Math.max(380, workAreaHeight - 80)),
+    };
+  }
+
+  private resizeStreamingAiWindow(mode: OfficePanelMode): void {
+    if (!this.streamingAiWindow) {
+      return;
+    }
+    const workArea = screen.getDisplayMatching(this.streamingAiWindow.getBounds()).workArea;
+    const size = this.getStreamingPanelSize(mode, workArea.width, workArea.height);
+    this.streamingAiWindow.setBounds({
+      width: size.width,
+      height: size.height,
+      x: workArea.x + workArea.width - size.width - 16,
+      y: workArea.y + Math.max(16, workArea.height - size.height - 72),
+    }, true);
+  }
+
+  private createVoiceAskWindow(): void {
+    if (this.voiceAskWindow) {
+      return;
+    }
+    const panelPath = path.join(__dirname, '..', 'src', 'voice-ask', 'index.html');
+    const workArea = screen.getPrimaryDisplay().workArea;
+    // 多对话面板要同时放下左侧对话列表和右侧问答流，比单问单答时期更宽。
+    const width = Math.min(760, Math.max(480, workArea.width - 32));
+    const height = Math.min(540, Math.max(320, workArea.height - 80));
+    this.voiceAskWindow = new BrowserWindow({
+      width,
+      height,
+      minWidth: 460,
+      minHeight: 320,
+      x: workArea.x + workArea.width - width - 20,
+      y: workArea.y + Math.max(20, workArea.height - height - 76),
+      show: false,
+      title: 'typetype 语音问答',
+      icon: this.getWindowIconPath(),
+      autoHideMenuBar: true,
+      alwaysOnTop: true,
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+      },
+    });
+    this.voiceAskWindow.setMenuBarVisibility(false);
+    this.voiceAskWindow.loadFile(panelPath);
+    this.voiceAskWindow.on('close', (event) => {
+      if (!this.isQuitting) {
+        event.preventDefault();
+        this.voiceAskWindow?.hide();
+      }
+    });
+    this.voiceAskWindow.webContents.on('did-finish-load', () => this.publishVoiceAskState());
+  }
+
+  private getVoiceAskState(): VoiceAskState {
+    // 对话列表实时从存储取，保证重启后面板仍能看到历史对话。
+    return {
+      ...this.voiceAskState,
+      conversations: this.conversationStore.listSummaries(),
+      messages: this.conversationStore.get(this.voiceAskState.conversation_id)?.messages ?? [],
+    };
+  }
+
+  private showVoiceAskPanel(focus = true): VoiceAskState {
+    this.createVoiceAskWindow();
+    if (focus) {
+      this.voiceAskWindow?.show();
+      this.voiceAskWindow?.focus();
+    } else if (process.platform === 'win32' && this.voiceAskWindow && 'showInactive' in this.voiceAskWindow) {
+      this.voiceAskWindow.showInactive();
+    } else {
+      this.voiceAskWindow?.show();
+    }
+    this.publishVoiceAskState();
+    return this.getVoiceAskState();
+  }
+
+  private isLlmConfigured(): boolean {
+    const llm = this.settingsStore.getSettings().llm_rewrite;
+    return Boolean(llm?.enabled && llm.api_key.trim());
+  }
+
+  // 办公/问答用档位模型（office_model）；语音润写继续用轻量的 llm_rewrite.model。
+  private getOfficeLlmConfig(): LlmRewriteConfig {
+    const llm = this.settingsStore.getSettings().llm_rewrite;
+    return llm.office_model && llm.office_model !== llm.model
+      ? { ...llm, model: llm.office_model }
+      : llm;
+  }
+
+  private showVoiceAskConfigGuidance(): void {
+    this.voiceAskState = {
+      ...this.voiceAskState,
+      active: true,
+      status: 'error',
+      question: '',
+      answer: '',
+      error: '语音问答需要先配置国产 AI（如 DeepSeek）并填写 API Key。',
+      needs_llm_config: true,
+      updated_at: new Date().toISOString(),
+    };
+    this.showVoiceAskPanel(true);
+  }
+
+  private startVoiceAsk(): void {
+    // 未配置国产 AI 时，问答一定失败；直接给出可操作引导，而不是先录音再在面板里报错。
+    if (!this.isLlmConfigured()) {
+      this.showVoiceAskConfigGuidance();
+      return;
+    }
+    this.showVoiceAskPanel();
+    this.handleShortcutToggle('voice_ask');
+  }
+
+  private setVoiceAskAction(action: VoiceAskState['action']): VoiceAskState {
+    this.voiceAskState = { ...this.voiceAskState, action, updated_at: new Date().toISOString() };
+    this.publishVoiceAskState();
+    return this.getVoiceAskState();
+  }
+
+  private copyVoiceAskAnswer(): VoiceAskState {
+    if (this.voiceAskState.answer.trim()) {
+      clipboard.writeText(this.voiceAskState.answer);
+    }
+    return this.getVoiceAskState();
+  }
+
+  private async applyVoiceAskAnswer(): Promise<VoiceAskState> {
+    const answer = this.voiceAskState.answer.trim();
+    if (!answer) {
+      return this.getVoiceAskState();
+    }
+    await this.autoPaste.writeClipboard(answer);
+    if (!this.previousAppBundleId || this.isTypetypeWindowTarget(this.previousAppBundleId)) {
+      this.voiceAskState = {
+        ...this.voiceAskState,
+        error: '回答已复制到剪贴板，请在目标输入框中粘贴。',
+        updated_at: new Date().toISOString(),
+      };
+      this.publishVoiceAskState();
+      return this.getVoiceAskState();
+    }
+    const result = await this.autoPaste.pasteToApp(this.previousAppBundleId);
+    if (!result.ok) {
+      this.voiceAskState = {
+        ...this.voiceAskState,
+        error: '自动带入失败，回答已复制到剪贴板。',
+        updated_at: new Date().toISOString(),
+      };
+      this.publishVoiceAskState();
+    }
+    return this.getVoiceAskState();
+  }
+
+  private publishVoiceAskState(): void {
+    if (!this.voiceAskWindow || this.voiceAskWindow.isDestroyed()) {
+      return;
+    }
+    this.voiceAskWindow.webContents.send('voice_ask_updated', this.getVoiceAskState());
+  }
+
   private getStreamingAiPanelState(): StreamingAiPanelState {
+    const settings = this.settingsStore.getSettings();
+    const industryPack = getIndustryPack(settings.active_industry_pack);
     return {
       ...this.streamingAiState,
-      enabled: this.settingsStore.getSettings().streaming_ai_panel_enabled,
+      enabled: settings.streaming_ai_panel_enabled || this.streamingAiState.active,
+      industry_pack: industryPack.id,
+      industry_pack_label: industryPack.name,
+      panel_mode: settings.office_panel_mode,
+      // 由当前整理稿实时推导，避免和面板内容不同步。
+      pending_placeholders: findPendingPlaceholders(this.streamingAiState.ai_text || ''),
     };
   }
 
@@ -792,6 +1494,7 @@ class TypenewApp {
   }
 
   private async applyStreamingAiRefinedRaw(): Promise<StreamingAiPanelState> {
+    this.pendingRefinedApplyAt = 0;
     const settings = this.getStreamingRewriteSettings(this.settingsStore.getSettings());
     const refinedText = this.normalizeTranscriptText(
       sanitizeStreamingAiText(this.streamingAiState.refined_raw_text || this.streamingAiState.raw_text || ''),
@@ -865,6 +1568,14 @@ class TypenewApp {
 
     if (!this.streamingInsertionTransaction.hasInsertedText()) {
       await this.autoPaste.writeClipboard(summaryText);
+      if (!this.previousAppBundleId || this.isTypetypeWindowTarget(this.previousAppBundleId)) {
+        this.patchStreamingAiPanelState({
+          apply_status_text: '整理稿已复制到剪贴板，请在目标输入框中粘贴。',
+          status_text: '整理稿已复制。',
+          last_error: null,
+        }, { immediate: true });
+        return this.getStreamingAiPanelState();
+      }
       const pasteResult = await this.autoPaste.pasteToApp(this.previousAppBundleId);
       this.patchStreamingAiPanelState({
         apply_status_text: pasteResult.ok
@@ -1052,6 +1763,13 @@ class TypenewApp {
     }
 
     const status = this.stateMachine.getStatus();
+    const isStartState = status === 'idle' || status === 'done' || status === 'stopped';
+
+    // 语音问答未配置国产 AI 时，别开录音，直接弹引导面板。
+    if (intent === 'voice_ask' && isStartState && !this.isLlmConfigured()) {
+      this.showVoiceAskConfigGuidance();
+      return;
+    }
 
     if (status === 'idle' || status === 'done') {
       void this.startRecording(intent).catch((error) => {
@@ -1072,6 +1790,129 @@ class TypenewApp {
     } else if (status === 'transcribing' || status === 'translating') {
       this.stopThinking();
     }
+  }
+
+  // 依据当前设置启停原生键盘钩子：右 Alt 按住说话 和/或 双击 Ctrl 语音问答。
+  // 钩子加载失败时记录降级说明供设置页展示（F8/F9/F10 兜底键仍可用）。
+  private syncNativeHotkey(settings: Settings): void {
+    const wantsNativeAlt =
+      this.shortcutManager.isNativeHotkey(settings.hotkey) ||
+      this.shortcutManager.isNativeHotkey(settings.translate_hotkey);
+    const wantsDoubleCtrl = this.shortcutManager.isNativeHotkey(settings.voice_ask_hotkey);
+
+    if (!wantsNativeAlt && !wantsDoubleCtrl) {
+      this.nativeHotkeyManager.disable();
+      this.nativeHotkeyNote = null;
+      return;
+    }
+
+    const ok = this.nativeHotkeyManager.enable({
+      onPressStart: (intent) => this.handlePushToTalkStart(intent),
+      onPressEnd: (intent) => this.handlePushToTalkEnd(intent),
+      onDoubleCtrl: wantsDoubleCtrl ? () => this.handleDoubleCtrl() : undefined,
+      onDoubleShift: () => this.handleDoubleShift(),
+    });
+
+    if (ok) {
+      this.nativeHotkeyNote = null;
+      return;
+    }
+    const reason = this.nativeHotkeyManager.getFailureReason() ?? '未知原因';
+    this.nativeHotkeyNote = wantsDoubleCtrl
+      ? `原生按键监听不可用（${reason}），已自动改用 F8/F9/F10 备用键。`
+      : `右 Alt 原生监听不可用（${reason}），已自动改用 F8/F9 备用键。`;
+  }
+
+  // 双击 Ctrl → 语音问答（原生钩子回调）。先让"测试快捷键"消费，再走正常开关。
+  private handleDoubleCtrl(): void {
+    if (this.shortcutManager.resolvePendingTestExternally('voice_ask')) {
+      return;
+    }
+    this.handleShortcutToggle('voice_ask');
+  }
+
+  // 双击 Shift → 把待带入的整段修正稿带入光标处。
+  // 仅在"刚结束一段听写、修正稿待带入、未超时"时生效，其余场合双击 Shift 完全无副作用。
+  private static readonly PENDING_REFINED_APPLY_WINDOW_MS = 120000;
+  private pendingRefinedApplyAt = 0;
+
+  private handleDoubleShift(): void {
+    if (!this.pendingRefinedApplyAt) {
+      return;
+    }
+    if (Date.now() - this.pendingRefinedApplyAt > TypenewApp.PENDING_REFINED_APPLY_WINDOW_MS) {
+      this.pendingRefinedApplyAt = 0;
+      return;
+    }
+    const status = this.stateMachine.getStatus();
+    if (status !== 'idle' && status !== 'done') {
+      return;
+    }
+    this.pendingRefinedApplyAt = 0;
+    void this.applyStreamingAiRefinedRaw().catch((error) => {
+      console.warn('Double-shift apply refined failed:', error);
+    });
+  }
+
+  private handlePushToTalkStart(intent: PushToTalkIntent): void {
+    const now = Date.now();
+    this.lastShortcutEventAt = now;
+    this.lastShortcutIntent = intent;
+    // 测试快捷键流程优先消费本次触发。
+    if (this.shortcutManager.resolvePendingTestExternally('dictation') && intent === 'dictation') {
+      return;
+    }
+    if (this.shortcutManager.resolvePendingTestExternally('translation') && intent === 'translation') {
+      return;
+    }
+    this.recoverShortcutAndRecorderIfNeeded('push-to-talk-start');
+
+    if (this.recordingStartInFlight || this.pendingRecorderStart) {
+      return;
+    }
+    if (this.recordingStopInFlight || this.pendingRecorderResult) {
+      return;
+    }
+
+    const status = this.stateMachine.getStatus();
+    if (status === 'idle' || status === 'done') {
+      void this.startRecording(intent).catch((error) => {
+        console.error('Failed to start push-to-talk recording:', error);
+      });
+    } else if (status === 'stopped') {
+      this.stateMachine.dismissOverlay();
+      this.noteRuntimeStatus('idle');
+      this.hideOverlayWindow();
+      this.updateTrayAnimation();
+      this.publishSnapshot();
+      void this.startRecording(intent).catch((error) => {
+        console.error('Failed to start push-to-talk recording after stopped-state recovery:', error);
+      });
+    }
+  }
+
+  private handlePushToTalkEnd(intent: PushToTalkIntent): void {
+    const now = Date.now();
+    this.lastShortcutEventAt = now;
+    const status = this.stateMachine.getStatus();
+    if (status !== 'recording') {
+      // 转写中/翻译中松开右 Alt 不应取消在途任务。
+      return;
+    }
+
+    this.applyStopIntent(intent);
+    if (canStopRecording(now, this.recordingStopAllowedAt)) {
+      void this.stopRecording();
+      return;
+    }
+
+    // 按住时间过短（< 600ms 停止守卫），延迟到守卫期满再停，避免录音被吞。
+    const delay = Math.max(0, this.recordingStopAllowedAt - now);
+    setTimeout(() => {
+      if (this.stateMachine.getStatus() === 'recording') {
+        void this.stopRecording();
+      }
+    }, delay);
   }
 
   private applyStopIntent(intent: CaptureIntent): void {
@@ -1095,19 +1936,22 @@ class TypenewApp {
   }
 
   private registerShortcutsForSettings(settings: Settings, reason = 'settings'): void {
-    if (settings.hotkey === settings.translate_hotkey) {
-      throw new Error('翻译快捷键不能和语音输入快捷键相同。');
+    const configuredHotkeys = [settings.hotkey, settings.translate_hotkey, settings.voice_ask_hotkey];
+    if (new Set(configuredHotkeys).size !== configuredHotkeys.length) {
+      throw new Error('语音输入、翻译和语音问答快捷键不能相同。');
     }
 
     this.shortcutManager.unregisterAll();
+    this.syncNativeHotkey(settings);
 
+    const dictationNative = this.shortcutManager.isNativeHotkey(settings.hotkey);
     const dictationSuccess = this.shortcutManager.register(
       'dictation',
       settings.hotkey,
       () => {
         this.handleShortcutToggle('dictation');
       },
-      { disabledFallbackHotkeys: [settings.translate_hotkey] }
+      { disabledFallbackHotkeys: [settings.translate_hotkey, settings.voice_ask_hotkey] }
     );
     const translationSuccess = this.shortcutManager.register(
       'translation',
@@ -1115,7 +1959,15 @@ class TypenewApp {
       () => {
         this.handleShortcutToggle('translation');
       },
-      { disabledFallbackHotkeys: [settings.hotkey] }
+      { disabledFallbackHotkeys: [settings.hotkey, settings.voice_ask_hotkey] }
+    );
+    const voiceAskSuccess = this.shortcutManager.register(
+      'voice_ask',
+      settings.voice_ask_hotkey,
+      () => {
+        this.handleShortcutToggle('voice_ask');
+      },
+      { disabledFallbackHotkeys: [settings.hotkey, settings.translate_hotkey] }
     );
 
     console.log('Global shortcut registration', {
@@ -1130,14 +1982,24 @@ class TypenewApp {
         active: this.shortcutManager.getCurrentHotkey('translation'),
         success: translationSuccess,
       },
+      voice_ask: {
+        requested: settings.voice_ask_hotkey,
+        active: this.shortcutManager.getCurrentHotkey('voice_ask'),
+        success: voiceAskSuccess,
+      },
     });
 
-    if (!dictationSuccess) {
+    // 右 Alt 方案由原生键盘钩子驱动；只要钩子生效或有任何 globalShortcut 候选注册成功即视为可用。
+    const dictationUsable = dictationSuccess || (dictationNative && this.nativeHotkeyManager.isActive());
+    if (!dictationUsable) {
       throw new Error('语音输入快捷键注册失败，请更换快捷键组合后再试。');
     }
 
     if (!translationSuccess) {
       console.warn('Translation shortcut registration failed; dictation shortcut remains active');
+    }
+    if (!voiceAskSuccess) {
+      console.warn('Voice ask shortcut registration failed; dictation shortcut remains active');
     }
   }
 
@@ -1157,14 +2019,22 @@ class TypenewApp {
       return;
     }
 
+    const settings = this.settingsStore.getSettings();
+    const wantsNativeAlt =
+      this.shortcutManager.isNativeHotkey(settings.hotkey) ||
+      this.shortcutManager.isNativeHotkey(settings.translate_hotkey);
+    const nativeHealthy = !wantsNativeAlt || this.nativeHotkeyManager.isActive();
+
     const health = this.shortcutManager.getRegistrationHealth();
-    if (health.ok && !force) {
+    if (health.ok && nativeHealthy && !force) {
       return;
     }
 
     console.warn('Global shortcut registration health check failed; repairing', {
       reason,
       missing: health.missing,
+      native_alt_wanted: wantsNativeAlt,
+      native_alt_active: this.nativeHotkeyManager.isActive(),
     });
 
     try {
@@ -1321,6 +2191,19 @@ class TypenewApp {
     this.preloadTranslationStatus();
     this.preloadPunctuationStatus();
     this.primeAsrEngine();
+    this.primeInputInjector();
+  }
+
+  // 预热常驻输入进程。它的 PowerShell 启动 + Add-Type 运行时编译在慢机上要数秒，
+  // 以前是第一次上屏时才付这笔钱（还会连开三个进程），出字自然要等。
+  private primeInputInjector(): void {
+    if (process.platform !== 'win32') {
+      return;
+    }
+    const startedAt = Date.now();
+    void this.autoPaste.warmupInjector().then((ok) => {
+      console.log('Input injector warmup finished', { ok, elapsed_ms: Date.now() - startedAt });
+    });
   }
 
   private preloadDictionaryStatus(): void {
@@ -1402,16 +2285,16 @@ class TypenewApp {
     if (!settings.llm_rewrite?.enabled) {
       return {
         status: 'not_configured',
-        label: 'LLM 配置',
-        detail: '未启用 LLM 润写；不会调用 API。',
+        label: '国产 AI 配置',
+        detail: '未启用国产 AI 润写；不会调用在线服务。',
       };
     }
 
     if (!settings.llm_rewrite.api_key?.trim()) {
       return {
         status: 'not_configured',
-        label: 'LLM 配置',
-        detail: '已启用 LLM 润写，但还没有填写 API Key。',
+        label: '国产 AI 配置',
+        detail: '已启用国产 AI 润写，但还没有填写 API Key。',
       };
     }
 
@@ -1419,9 +2302,9 @@ class TypenewApp {
     const hasModel = Boolean(settings.llm_rewrite.model?.trim());
     return {
       status: hasBaseUrl && hasModel ? 'configured' : 'error',
-      label: 'LLM 配置',
+      label: '国产 AI 配置',
       detail: hasBaseUrl && hasModel
-        ? `已配置 ${settings.llm_rewrite.model}，未主动消耗 API 额度。`
+        ? '国产 AI 服务已配置，未主动消耗 API 额度。'
         : '服务地址或服务参数为空，请重新选择大模型厂家。',
     };
   }
@@ -1480,10 +2363,22 @@ class TypenewApp {
     }
   }
 
-  private showSettingsWindow(): void {
+  private showSettingsWindow(focus?: string): void {
     this.createSettingsWindow();
+    if (this.settingsWindow?.isMinimized()) {
+      this.settingsWindow.restore();
+    }
     this.settingsWindow?.show();
     this.settingsWindow?.focus();
+    if (focus && this.settingsWindow) {
+      const target = this.settingsWindow.webContents;
+      const send = () => target.send('settings_focus', focus);
+      if (target.isLoading()) {
+        target.once('did-finish-load', send);
+      } else {
+        send();
+      }
+    }
   }
 
   private openAccessibilitySettings(): void {
@@ -1510,6 +2405,59 @@ class TypenewApp {
     const logDir = getLogDirectory();
     fs.mkdirSync(logDir, { recursive: true });
     shell.openPath(logDir);
+  }
+
+  // API Key 申请页面白名单：渲染层只传厂家 key，主进程用白名单查 URL 并 shell.openExternal，
+  // 避免把"打开任意 URL"的能力暴露给渲染层（防钓鱼/防协议漏洞）。
+  private static readonly API_KEY_URLS: Record<string, string> = {
+    minimax_cn: 'https://platform.minimaxi.com/user-center/basic-information/interface-key',
+    deepseek: 'https://platform.deepseek.com/api_keys',
+    qwen_cn: 'https://bailian.console.aliyun.com/?apiKey=1',
+    zhipu: 'https://bigmodel.cn/usercenter/proj-mgmt/apikeys',
+    kimi_cn: 'https://platform.moonshot.cn/console/api-keys',
+    siliconflow: 'https://cloud.siliconflow.cn/account/ak',
+    baidu_cn: 'https://console.bce.baidu.com/qianfan/ais/console/applicationConsole/password',
+    baichuan: 'https://platform.baichuan-ai.com/console/apikey',
+    doubao: 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey',
+  };
+
+  private openApiKeyPage(providerKey: string): void {
+    const url = TypenewApp.API_KEY_URLS[providerKey];
+    if (!url) {
+      console.warn('[open_api_key_page] unknown provider key', providerKey);
+      return;
+    }
+    shell.openExternal(url);
+  }
+
+  // 系统对话框的父窗口：从 AI 面板发起的（导出/导入）必须挂在面板上，
+  // 否则面板是 alwaysOnTop，会把对话框盖住（用户看不到保存框，以为卡死）。
+  private getDialogParentWindow(): BrowserWindow | null {
+    if (this.streamingAiWindow && !this.streamingAiWindow.isDestroyed() && this.streamingAiWindow.isVisible()) {
+      return this.streamingAiWindow;
+    }
+    if (this.settingsWindow && !this.settingsWindow.isDestroyed()) {
+      return this.settingsWindow;
+    }
+    return null;
+  }
+
+  // 弹系统对话框期间临时取消面板置顶，结束后恢复。
+  // 用 try/finally，避免中途异常导致面板永久失去置顶。
+  private async withDialogWindow<T>(run: (parent: BrowserWindow | null) => Promise<T>): Promise<T> {
+    const parent = this.getDialogParentWindow();
+    const panel = this.streamingAiWindow;
+    const panelWasOnTop = Boolean(panel && !panel.isDestroyed() && panel.isAlwaysOnTop());
+    if (panelWasOnTop) {
+      panel!.setAlwaysOnTop(false);
+    }
+    try {
+      return await run(parent);
+    } finally {
+      if (panelWasOnTop && panel && !panel.isDestroyed()) {
+        panel.setAlwaysOnTop(true);
+      }
+    }
   }
 
   private openFeedbackEmail(): void {
@@ -1542,15 +2490,8 @@ class TypenewApp {
     return `${this.getStreamingModelLabel(settings)} · ${this.getStreamingEnhancementModeLabel(settings)}`;
   }
 
-  private getStreamingModelLabel(settings: Settings): string {
-    switch (settings.streaming_model) {
-      case 'multilingual_segmented':
-        return '多语分段流式';
-      case 'zh_high_accuracy_realtime':
-        return '中文高精度流式';
-      default:
-        return '多语实时流式';
-    }
+  private getStreamingModelLabel(_settings: Settings): string {
+    return '分段离线流式';
   }
 
   private getVoicePackageLabel(settings: Settings): string {
@@ -1588,6 +2529,7 @@ class TypenewApp {
       permissions_summary: process.platform === 'darwin'
         ? 'typetype 依赖麦克风、输入监听和辅助功能权限完成全局录音触发与自动回填。'
         : 'typetype 使用本机权限完成语音输入。',
+      hotkey_backend_note: this.nativeHotkeyNote,
       preload_status: this.preloadStatus,
     };
   }
@@ -1598,6 +2540,10 @@ class TypenewApp {
     this.registerShortcutsForSettings(normalizedSettings, 'settings-save');
     this.startShortcutWatchdog();
     this.stateMachine.applySettings(normalizedSettings);
+    this.streamingAiState.industry_pack = normalizedSettings.active_industry_pack;
+    this.streamingAiState.industry_pack_label = getIndustryPack(normalizedSettings.active_industry_pack).name;
+    this.streamingAiState.panel_mode = normalizedSettings.office_panel_mode;
+    this.resizeStreamingAiWindow(normalizedSettings.office_panel_mode);
     this.applyLoginItemSettings(normalizedSettings);
     this.asrEngine = null;
     this.translationAsrEngine = null;
@@ -1668,6 +2614,7 @@ class TypenewApp {
     return [
       `dictation:${this.shortcutManager.getCurrentHotkey('dictation') || '未注册'}`,
       `translation:${this.shortcutManager.getCurrentHotkey('translation') || '未注册'}`,
+      `voice_ask:${this.shortcutManager.getCurrentHotkey('voice_ask') || '未注册'}`,
     ];
   }
 
@@ -1676,7 +2623,7 @@ class TypenewApp {
     if (health.ok) {
       return '正常';
     }
-    return `需要修复: ${health.missing.join(', ') || '未知快捷键'}`;
+    return `需要修复: ${health.missing.map((item) => `${item.actionId}:${item.accelerator}`).join(', ') || '未知快捷键'}`;
   }
 
   private async runAsrDiagnostics(): Promise<AsrDiagnostics> {
@@ -1829,6 +2776,19 @@ class TypenewApp {
     };
   }
 
+  private async captureVoiceAskSelectionContext(): Promise<string> {
+    const selectedText = await this.autoPaste.captureSelectedText();
+    const dictionaryText = this.dictionaryStore.applyToText(stripUnknownTokens(selectedText));
+    return this.codeSwitchLexicon.applyToText(dictionaryText).text;
+  }
+
+  // 语音修订的"待修订稿件"：优先整理稿，其次修正原文。
+  private getCurrentDraftForRevision(): string {
+    return sanitizeStreamingAiText(
+      this.streamingAiState.ai_text || this.streamingAiState.refined_raw_text || ''
+    ).trim();
+  }
+
   private async captureOutputTarget(): Promise<string | null> {
     try {
       const target = await this.autoPaste.captureFrontmostApp();
@@ -1884,11 +2844,35 @@ class TypenewApp {
 
     try {
       this.previousAppBundleId = await this.captureOutputTarget();
+      if (intent === 'voice_ask') {
+        // 修订模式：待修订的是面板里的当前稿件，不是屏幕选中文本。
+        this.voiceAskContextText = this.voiceAskState.action === 'revise'
+          ? this.getCurrentDraftForRevision()
+          : await this.captureVoiceAskSelectionContext();
+      } else {
+        this.voiceAskContextText = '';
+      }
+      if (intent === 'voice_ask') {
+        this.voiceAskState = {
+          ...this.voiceAskState,
+          active: true,
+          status: 'recording',
+          question: '',
+          context_text: this.voiceAskContextText,
+          answer: '',
+          error: null,
+          needs_llm_config: false,
+          updated_at: new Date().toISOString(),
+        };
+        this.showVoiceAskPanel(false);
+      }
       const settings = this.settingsStore.getSettings();
       this.streamingSessionId += 1;
       this.streamingChunkLogCount = 0;
       this.streamingPastedText = '';
       this.streamingPastedSourceText = '';
+      // 新一段录音开始：作废上一段"待带入"的修正稿，防止双击 Shift 把旧稿盖到新文字上。
+      this.pendingRefinedApplyAt = 0;
       this.streamingInsertionTransaction.reset(this.previousAppBundleId);
       this.streamingOutputText = '';
       this.streamingLatestText = '';
@@ -1924,7 +2908,10 @@ class TypenewApp {
         if (!this.isActiveSegmentedStreamingMode(settings)) {
           this.asrEngine.startStreamingSession();
         }
-        this.streamingSegmenter = new StreamingSegmenter();
+        // 连续说话（中间不停顿）时，只有 maxSegment 能触发出字。6 秒一刀意味着
+        // 用户至少要等 6 秒 + 识别时间才见到第一个字；缩到 3.6 秒明显更跟手，
+        // 而 SenseVoice 是整段离线识别，段短一点对准确率影响很小。
+        this.streamingSegmenter = new StreamingSegmenter(16000, { maxSegmentMs: 3600 });
         console.log('Streaming ASR session started', {
           streaming_model: settings.streaming_model,
           segmented: this.isActiveSegmentedStreamingMode(settings),
@@ -2216,6 +3203,20 @@ class TypenewApp {
         confidence: asrResult.confidence,
       });
 
+      if (this.activeCaptureIntent === 'voice_ask') {
+        await this.handleVoiceAskQuestion(cleanedTranscript);
+        const answer = this.voiceAskState.answer || cleanedTranscript;
+        this.stateMachine.finishOutput(answer);
+        timing.text_length = answer.length;
+        timing.total_ms = Date.now() - totalStartedAt;
+        this.lastNonStreamingTiming = timing;
+        this.publishSettingsViewData();
+        this.publishSnapshot();
+        this.hideOverlayWindow();
+        this.updateTrayAnimation();
+        return;
+      }
+
       let finalText: string;
       if (this.activeCaptureIntent === 'translation') {
         finalText = await this.translateTranscript(cleanedTranscript);
@@ -2251,6 +3252,7 @@ class TypenewApp {
       }
       timing.text_length = finalText.length;
       this.autoLearnFromTranscript(`${cleanedTranscript}\n${finalText}`, settings);
+      this.recordVoiceWorkHistory(finalText, settings);
       console.log('[translation-debug] final-output-ready', {
         intent: this.activeCaptureIntent,
         text_length: finalText.length,
@@ -2289,6 +3291,204 @@ class TypenewApp {
     }
   }
 
+  // 打字/粘贴提问：跳过录音与识别，直接把文字问题交给问答流程。
+  private async askVoiceQuestionText(question: string): Promise<VoiceAskState> {
+    const trimmed = (question || '').trim();
+    if (!trimmed) {
+      return this.voiceAskState;
+    }
+    if (!this.isLlmConfigured()) {
+      this.showVoiceAskConfigGuidance();
+      return this.voiceAskState;
+    }
+    await this.handleVoiceAskQuestion(trimmed);
+    return this.voiceAskState;
+  }
+
+  // 当前对话；没有就建一个。所有提问都必须落进某个对话，避免再出现"问第二句冲掉第一句"。
+  private ensureActiveConversation(): string {
+    const current = this.voiceAskState.conversation_id;
+    if (current && this.conversationStore.get(current)) {
+      return current;
+    }
+    const created = this.conversationStore.create();
+    this.voiceAskState = { ...this.voiceAskState, conversation_id: created.id };
+    return created.id;
+  }
+
+  // 把对话列表与当前对话消息同步进面板状态。
+  private buildConversationStatePatch(conversationId: string | null): Partial<VoiceAskState> {
+    return {
+      conversation_id: conversationId,
+      conversations: this.conversationStore.listSummaries(),
+      messages: this.conversationStore.get(conversationId)?.messages ?? [],
+    };
+  }
+
+  private createVoiceAskConversation(): VoiceAskState {
+    const created = this.conversationStore.create();
+    this.voiceAskState = {
+      ...this.voiceAskState,
+      active: true,
+      status: 'idle',
+      question: '',
+      answer: '',
+      context_text: '',
+      error: null,
+      updated_at: new Date().toISOString(),
+      ...this.buildConversationStatePatch(created.id),
+    };
+    this.publishVoiceAskState();
+    return this.getVoiceAskState();
+  }
+
+  private selectVoiceAskConversation(id: string): VoiceAskState {
+    const target = this.conversationStore.get(id);
+    if (!target) {
+      return this.getVoiceAskState();
+    }
+    // 切换对话时把最后一轮回填到 question/answer，保持旧渲染路径可用。
+    const lastUser = [...target.messages].reverse().find((m) => m.role === 'user');
+    const lastAssistant = [...target.messages].reverse().find((m) => m.role === 'assistant');
+    this.voiceAskState = {
+      ...this.voiceAskState,
+      active: true,
+      status: 'idle',
+      error: null,
+      question: lastUser?.content ?? '',
+      answer: lastAssistant?.content ?? '',
+      context_text: '',
+      updated_at: new Date().toISOString(),
+      ...this.buildConversationStatePatch(id),
+    };
+    this.publishVoiceAskState();
+    return this.getVoiceAskState();
+  }
+
+  private renameVoiceAskConversation(id: string, title: string): VoiceAskState {
+    this.conversationStore.rename(id, title);
+    this.voiceAskState = {
+      ...this.voiceAskState,
+      ...this.buildConversationStatePatch(this.voiceAskState.conversation_id),
+    };
+    this.publishVoiceAskState();
+    return this.getVoiceAskState();
+  }
+
+  private deleteVoiceAskConversation(id: string): VoiceAskState {
+    this.conversationStore.remove(id);
+    // 删掉的正是当前对话时，切到最近一个；没有就置空。
+    const nextId = this.voiceAskState.conversation_id === id
+      ? (this.conversationStore.listSummaries()[0]?.id ?? null)
+      : this.voiceAskState.conversation_id;
+    const next = nextId ? this.conversationStore.get(nextId) : null;
+    const lastUser = next ? [...next.messages].reverse().find((m) => m.role === 'user') : null;
+    const lastAssistant = next ? [...next.messages].reverse().find((m) => m.role === 'assistant') : null;
+    this.voiceAskState = {
+      ...this.voiceAskState,
+      question: lastUser?.content ?? '',
+      answer: lastAssistant?.content ?? '',
+      error: null,
+      updated_at: new Date().toISOString(),
+      ...this.buildConversationStatePatch(nextId),
+    };
+    this.publishVoiceAskState();
+    return this.getVoiceAskState();
+  }
+
+  private async handleVoiceAskQuestion(question: string): Promise<void> {
+    // 修订模式始终以"当前稿件"为准（打字修订时录音期没抓过上下文）。
+    if (this.voiceAskState.action === 'revise') {
+      this.voiceAskContextText = this.getCurrentDraftForRevision();
+      if (!this.voiceAskContextText) {
+        this.voiceAskState = {
+          ...this.voiceAskState,
+          active: true,
+          status: 'error',
+          question,
+          context_text: '',
+          answer: '',
+          error: '还没有可修订的稿件，请先完成一次语音整理再使用"修订当前稿件"。',
+          updated_at: new Date().toISOString(),
+        };
+        this.showVoiceAskPanel(false);
+        this.publishVoiceAskState();
+        return;
+      }
+    }
+
+    // 提问前先落到某个对话里：没有选中对话就新建一个（首问会自动命名）。
+    const conversationId = this.ensureActiveConversation();
+    // 取历史必须在写入本轮提问【之前】，否则当前问题会被当成历史重复发一遍。
+    // 修订轮的内容是整篇稿件，混进历史会瞬间吃光字数预算，所以排除。
+    const priorMessages = (this.conversationStore.get(conversationId)?.messages ?? [])
+      .filter((m) => m.action !== 'revise');
+    const history = selectHistoryForPrompt(priorMessages);
+
+    this.conversationStore.appendMessage(conversationId, {
+      role: 'user',
+      content: question,
+      action: this.voiceAskState.action,
+    });
+
+    this.voiceAskState = {
+      ...this.voiceAskState,
+      active: true,
+      status: 'thinking',
+      question,
+      context_text: this.voiceAskContextText,
+      answer: '',
+      error: null,
+      updated_at: new Date().toISOString(),
+      ...this.buildConversationStatePatch(conversationId),
+    };
+    this.showVoiceAskPanel(false);
+    try {
+      // 问答/办公走"档位模型"（office_model），润写才用轻量 model。
+      const answer = await runVoiceAsk(
+        this.getOfficeLlmConfig(),
+        question,
+        this.voiceAskContextText,
+        this.voiceAskState.action,
+        {
+          webSearch: this.settingsStore.getSettings().voice_ask_web_search,
+          history: history.map((m) => ({ role: m.role, content: m.content })),
+        }
+      );
+      this.conversationStore.appendMessage(conversationId, {
+        role: 'assistant',
+        content: answer,
+        action: this.voiceAskState.action,
+      });
+      this.voiceAskState = {
+        ...this.voiceAskState,
+        status: 'ready',
+        answer,
+        error: null,
+        updated_at: new Date().toISOString(),
+        ...this.buildConversationStatePatch(conversationId),
+      };
+      // 修订结果回写整理稿，这样可以对同一份稿件连续多轮修订。
+      if (this.voiceAskState.action === 'revise' && answer.trim()) {
+        this.patchStreamingAiPanelState({
+          ai_text: answer.trim(),
+          status_text: '稿件已按修订指令更新；可继续修订或一键带入。',
+        }, { immediate: true });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.voiceAskState = {
+        ...this.voiceAskState,
+        status: 'error',
+        answer: '',
+        error: message,
+        needs_llm_config: message.includes('API Key') || message.includes('配置国产 AI'),
+        updated_at: new Date().toISOString(),
+      };
+    }
+    this.publishVoiceAskState();
+  }
+
   private async outputTranscript(finalText: string, autoPasteEnabled: boolean): Promise<void> {
     // 先写剪贴板，再按需执行自动回填，这样即使自动回填失败，
     // 用户也还能手动粘贴识别结果。
@@ -2299,6 +3499,14 @@ class TypenewApp {
     }
 
     this.hideOverlayWindow();
+
+    // 丝滑快路径（对标 typeless）：先恢复目标窗口焦点，再用 SendInput 一次性注入整段，
+    // 省掉剪贴板 Ctrl+V 与抓取校验的额外进程。失败透明回退到原剪贴板粘贴路径。
+    if (await this.tryInjectFinalTranscript(finalText)) {
+      this.stateMachine.markAutoPasteSuccess();
+      return;
+    }
+
     const pasteResult = await this.autoPaste.pasteToApp(this.previousAppBundleId);
     if (pasteResult.ok) {
       this.stateMachine.markAutoPasteSuccess();
@@ -2311,8 +3519,44 @@ class TypenewApp {
     }
   }
 
+  // 恢复目标焦点后一次性注入整段识别文本；仅 Windows 注入器可用时成功。
+  private async tryInjectFinalTranscript(finalText: string): Promise<boolean> {
+    if (!finalText) {
+      return false;
+    }
+    try {
+      if (this.previousAppBundleId) {
+        await this.autoPaste.restoreForegroundApp(this.previousAppBundleId);
+        await new Promise((resolve) => setTimeout(resolve, FOREGROUND_RESTORE_DELAY_MS));
+      }
+      return await this.autoPaste.injectAppendText(finalText);
+    } catch (error) {
+      console.warn('Final transcript injection failed; falling back to clipboard paste', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  }
+
   private isStreamingOutputMode(): boolean {
     return this.settingsStore.getSettings().recognition_mode === 'streaming_output';
+  }
+
+  /**
+   * 当前文本命中的行业术语，三个词源合一：
+   *   1) 行业包内置词（33 个包，各 18–49 条）
+   *   2) 系统大词库中该行业对应类目的词（只有医学/IT/法律/餐饮/财经 5 个领域有量）
+   *   3) 用户自建/导入的行业词表（监狱、公安等长尾行业唯一的扩词途径）
+   * 三者都只取"文本里真正出现过的"词，所以哪怕接了 18465 条医学词也不会撑爆 prompt。
+   */
+  private getIndustryTermsForText(text: string, settings: Settings, limit = 60): string[] {
+    const industryId = settings.active_industry_pack;
+    const categories = getIndustryLexiconCategories(industryId);
+    const lexiconTerms = categories.length > 0
+      ? this.dictionaryStore.getMatchedSystemTermsByCategories(text, categories, limit)
+      : [];
+    const customTerms = this.customIndustryStore.getMatchedTerms(text, industryId, limit);
+    return matchIndustryTerms(text, industryId, limit, [...lexiconTerms, ...customTerms]);
   }
 
   private isSegmentedStreamingMode(settings: Settings = this.settingsStore.getSettings()): boolean {
@@ -2372,6 +3616,9 @@ class TypenewApp {
   }
 
   private async getAsrEngineForTranscription(): Promise<AsrEngine | null> {
+    if (this.activeCaptureIntent === 'voice_ask') {
+      return this.getNonStreamingAsrEngine();
+    }
     if (this.activeCaptureIntent !== 'translation' || translationSupportsRecognitionMode(this.settingsStore.getSettings().recognition_mode)) {
       await this.ensureAsrEngineReady();
       return this.asrEngine;
@@ -2421,7 +3668,11 @@ class TypenewApp {
   ): string {
     const cleaned = cleanupTranscript(text, settings);
     const dictionaryApplied = this.dictionaryStore.applyToText(cleaned, options);
-    const codeSwitchResult = this.codeSwitchLexicon.applyToText(dictionaryApplied, options);
+    // 同音纠错在词典替换之后、混输之前：把 SenseVoice 的同音错字（预政管理课→狱政管理科）纠回术语。
+    const pinyinCorrected = this.pinyinCorrectionEngine.applyToText(dictionaryApplied, {
+      partial: options.partial,
+    }).text;
+    const codeSwitchResult = this.codeSwitchLexicon.applyToText(pinyinCorrected, options);
     const normalized = this.normalizeTranscriptText(codeSwitchResult.text, settings, {
       ...options,
       extraPreserveTerms: codeSwitchResult.matchedTerms,
@@ -2452,6 +3703,8 @@ class TypenewApp {
     const preserveTerms = Array.from(new Set([
       ...this.dictionaryStore.getMatchedTerms(text, 80),
       ...this.codeSwitchLexicon.getMatchedTerms(text, 80),
+      // 行业术语同样要在数字/格式归一化时受保护（如"三大队"不应被转成"3大队"）。
+      ...this.getIndustryTermsForText(text, settings, 60),
       ...(options.extraPreserveTerms ?? []),
     ]));
 
@@ -2494,10 +3747,12 @@ class TypenewApp {
     const cleanText = this.normalizeTranscriptText(stripUnknownTokens(text), settings, { partial: !final });
     const dictionaryTerms = this.dictionaryStore.getMatchedTerms(cleanText, 60);
     const codeSwitchTerms = this.codeSwitchLexicon.getMatchedTerms(cleanText, 60);
+    // 行业术语此前从未进入本地改写的保护名单——选了"监狱"包，离线改写仍会改坏狱政术语。
+    const industryTerms = this.getIndustryTermsForText(cleanText, settings, 60);
     return rewriteChineseLocally({
       rawText: cleanText,
       scenario: settings.rewrite_scenario,
-      preserveTerms: [...dictionaryTerms, ...codeSwitchTerms],
+      preserveTerms: [...dictionaryTerms, ...codeSwitchTerms, ...industryTerms],
       final,
     });
   }
@@ -2625,11 +3880,12 @@ class TypenewApp {
       console.warn('Non-streaming punctuation finished with an error after fallback:', error);
     });
 
+    const budgetMs = nonStreamingPunctuationBudgetMs(Array.from(cleanText).length);
     try {
       const result = await Promise.race<LocalPunctuationRestoreResult | 'timeout'>([
         punctuationPromise,
         new Promise<'timeout'>((resolve) => {
-          timer = setTimeout(() => resolve('timeout'), NON_STREAMING_PUNCTUATION_TIMEOUT_MS);
+          timer = setTimeout(() => resolve('timeout'), budgetMs);
         }),
       ]);
       if (timer) {
@@ -2895,6 +4151,7 @@ class TypenewApp {
       const result = await rewriteWithPreferredLlm(apiInput, settings, {
         preserveTerms: localRewrite.preserveTerms,
         scenario: settings.rewrite_scenario,
+        industryPack: settings.active_industry_pack,
         voiceFormattingEnabled: settings.voice_formatting_enabled,
       });
 
@@ -2972,7 +4229,7 @@ class TypenewApp {
       case 'online_enhanced':
         return this.canUseStreamingAi(settings)
           ? `非涉密增强模式：${outputStyle}，停顿后面板生成 AI 修正原文和整理稿。`
-          : `非涉密增强模式：${outputStyle}；LLM 未启用或 API Key 未填写，面板先显示本地草稿。`;
+          : `非涉密增强模式：${outputStyle}；国产 AI 未启用或 API Key 未填写，面板先显示本地草稿。`;
       default:
         return `涉密离线模式：${outputStyle}，面板只做本地断句和终稿校准，不调用 API。`;
     }
@@ -3231,6 +4488,7 @@ class TypenewApp {
       const result = await rewriteWithPreferredLlm(prompt, settings, {
         preserveTerms: localRewrite.preserveTerms,
         scenario: settings.rewrite_scenario,
+        industryPack: settings.active_industry_pack,
         voiceFormattingEnabled: settings.voice_formatting_enabled,
       });
 
@@ -3570,7 +4828,37 @@ class TypenewApp {
         rolling_cache: audioCacheStats.truncated,
       });
     }
+    // 分段模式下切句必须同步做：切句只是能量统计，几乎不耗时，而识别一段要几百毫秒到几秒。
+    // 如果像以前那样把两者串在同一条 promise 队列上，识别在跑时后续音频就进不了切分器，
+    // 断句被推迟 → 下一段又更晚 → 延迟一路累积（客户视频里 6 秒、12 秒越拖越长就是这么来的）。
+    if (this.isActiveSegmentedStreamingMode()) {
+      const segments = this.streamingSegmenter?.push(samples) ?? [];
+      if (segments.length > 0) {
+        this.queueStreamingSegments(segments, this.streamingSessionId);
+      }
+      return;
+    }
+
     this.queueStreamingChunk(samples, this.streamingSessionId);
+  }
+
+  // 识别单独排队：段与段之间仍按顺序解码（保证出字顺序），但不再阻塞音频进入切分器。
+  private queueStreamingSegments(segments: StreamingSegmentEvent[], sessionId: number): void {
+    this.streamingChunkQueue = this.streamingChunkQueue
+      .then(async () => {
+        if (sessionId !== this.streamingSessionId) {
+          return;
+        }
+        await this.ensureAsrEngineReady();
+        await this.processSegmentedStreamingSegments(
+          segments,
+          this.settingsStore.getSettings(),
+          sessionId
+        );
+      })
+      .catch((error) => {
+        console.error('Segmented streaming queue failed:', error);
+      });
   }
 
   private appendStreamingStableText(currentText: string, nextText: string): string {
@@ -3587,6 +4875,35 @@ class TypenewApp {
     }
     const needsSpace = /[A-Za-z0-9]$/u.test(left) && /^[A-Za-z0-9]/u.test(right);
     return `${left}${needsSpace ? ' ' : ''}${right}`;
+  }
+
+  /** 给一个 promise 设时间预算：超时返回 null（不取消原 promise，只是不再等它）。 */
+  private withTimeBudget<T>(promise: Promise<T>, budgetMs: number): Promise<T | null> {
+    return new Promise<T | null>((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          resolve(null);
+        }
+      }, budgetMs);
+      void promise.then(
+        (value) => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            resolve(value);
+          }
+        },
+        () => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            resolve(null);
+          }
+        }
+      );
+    });
   }
 
   private async processSegmentedStreamingSegments(
@@ -3621,14 +4938,43 @@ class TypenewApp {
           continue;
         }
 
+        // 方案 A：流式边说边出时，逐句直接插入带标点断句的"修正原文"（append-only，逐句定稿不回改）。
+        let displaySegment = cleanedSegment;
+        if (settings.insert_refined_streaming && !final) {
+          try {
+            // 断句模型是本地 ONNX 推理，慢机上可能跑到秒级。它挂在出字的必经路上，
+            // 所以给一个预算：超时就先把原文上屏，标点交给终稿补——宁可少个逗号，
+            // 也不能让用户盯着空白等。
+            const refined = await this.withTimeBudget(
+              this.buildModelAssistedLocalChineseRewrite(cleanedSegment, settings, false),
+              STREAMING_SEGMENT_REFINE_BUDGET_MS
+            );
+            if (sessionId !== this.streamingSessionId) {
+              return;
+            }
+            const refinedText = refined
+              ? this.normalizeTranscriptText(
+                sanitizeStreamingAiText(refined.rewrite.refinedRawText),
+                settings,
+                { partial: true }
+              )
+              : '';
+            if (refinedText) {
+              displaySegment = refinedText;
+            }
+          } catch (error) {
+            console.warn('Segmented refined insertion failed; falling back to raw segment', error);
+          }
+        }
+
         const sourceBefore = this.streamingLatestText || this.streamingPastedSourceText || this.streamingOutputText;
-        const combinedText = this.appendStreamingStableText(sourceBefore, cleanedSegment);
+        const combinedText = this.appendStreamingStableText(sourceBefore, displaySegment);
         this.streamingLatestText = combinedText;
 
         if (settings.auto_paste && !this.streamingAutoPasteSuspended) {
           const delta = combinedText.startsWith(this.streamingPastedSourceText)
             ? combinedText.slice(this.streamingPastedSourceText.length)
-            : this.appendStreamingStableText('', cleanedSegment);
+            : this.appendStreamingStableText('', displaySegment);
           if (delta) {
             this.enqueueStreamingPaste(delta, combinedText, sessionId);
             this.streamingPendingAiReviewAfterCommit = true;
@@ -3804,6 +5150,7 @@ class TypenewApp {
 
     const normalized = this.stateMachine.finishOutput(finalText);
     this.autoLearnFromTranscript(normalized, settings);
+    this.recordVoiceWorkHistory(normalized, settings);
     console.log('Streaming transcription complete', createTranscriptionLogMeta(normalized));
 
     let finalPanelText = normalized;
@@ -3816,43 +5163,59 @@ class TypenewApp {
         ? prefixStreamingBoundaryPunctuation(this.streamingOutputText || this.streamingPastedText, finalDelta)
         : finalDelta;
 
+      let deferredFinalApply = false;
       if (pasteText) {
         this.enqueueStreamingPaste(pasteText, finalText, sessionId);
         await this.waitForStreamingPasteQueueToDrain(sessionId);
         autoPasteSucceeded = !this.streamingAutoPasteSuspended && this.streamingInsertionTransaction.hasInsertedText();
       } else if (this.streamingPastedSourceText && this.streamingPastedSourceText !== finalText) {
-        const replaceResult = await this.streamingInsertionTransaction.replaceInsertedText(
-          finalText,
-          this.previousAppBundleId
-        );
-        if (replaceResult.status === 'replaced') {
-          this.streamingPastedText = finalText;
-          this.streamingOutputText = finalText;
-          this.streamingCursorCommitState = {
-            committedText: finalText,
-            committedSourceText: finalText,
-            committedAt: Date.now(),
-            sessionId,
-          };
-          finalPanelText = finalText;
-          autoPasteSucceeded = true;
-          console.log('Streaming final text replaced pasted partials', {
-            chars_replaced: replaceResult.charsReplaced,
-            final_length: Array.from(finalText).length,
-          });
+        if (!settings.auto_apply_final_refined) {
+          // 默认不自动整段替换：保留光标处已出文字，终稿存入面板，等双击 Shift 或"一键带入"。
+          deferredFinalApply = true;
+          this.pendingRefinedApplyAt = Date.now();
+          this.patchStreamingAiPanelState({
+            refined_raw_text: finalText,
+            can_apply_refined_raw: true,
+            apply_status_text: '修正稿已就绪：双击 Shift 或点"一键带入"，替换光标处文字。',
+            status_text: '已保留光标处原文；整段修正稿待带入。',
+          }, { immediate: true });
         } else {
-          console.warn('Streaming final text diverged from pasted partials and could not be replaced', {
-            status: replaceResult.status,
-            pasted_length: this.streamingPastedSourceText.length,
-            final_length: finalText.length,
-            error: replaceResult.error,
-          });
+          const replaceResult = await this.streamingInsertionTransaction.replaceInsertedText(
+            finalText,
+            this.previousAppBundleId
+          );
+          if (replaceResult.status === 'replaced') {
+            this.streamingPastedText = finalText;
+            this.streamingOutputText = finalText;
+            this.streamingCursorCommitState = {
+              committedText: finalText,
+              committedSourceText: finalText,
+              committedAt: Date.now(),
+              sessionId,
+            };
+            finalPanelText = finalText;
+            autoPasteSucceeded = true;
+            console.log('Streaming final text replaced pasted partials', {
+              chars_replaced: replaceResult.charsReplaced,
+              final_length: Array.from(finalText).length,
+            });
+          } else {
+            console.warn('Streaming final text diverged from pasted partials and could not be replaced', {
+              status: replaceResult.status,
+              pasted_length: this.streamingPastedSourceText.length,
+              final_length: finalText.length,
+              error: replaceResult.error,
+            });
+          }
         }
       }
 
       await this.autoPaste.writeClipboard(normalized);
       this.streamingInsertionTransaction.rememberClipboardText(normalized);
-      this.streamingPastedSourceText = finalText;
+      // 延迟带入时保持"已插入文本"的真实记录，否则后续替换会算错要删的字数。
+      if (!deferredFinalApply) {
+        this.streamingPastedSourceText = finalText;
+      }
       this.streamingPastedText = this.streamingPastedText || finalText;
       finalPanelText = this.getStreamingCommittedText() || finalText;
       if (autoPasteSucceeded) {

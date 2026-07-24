@@ -6,14 +6,15 @@ import { app } from 'electron';
 
 import { getDefaultNumThreads, getProviderCandidates, ProviderName } from './asr-runtime';
 import { stripUnknownTokens } from './transcript-cleanup';
-import { AsrHotwordStatus, ComputeBackend, RecognitionMode, RichAsrResult } from './types';
+import { AsrHotwordStatus, ComputeBackend, RecognitionMode, RichAsrResult, SenseVoiceLanguage } from './types';
 
 export interface ModelFiles {
   modelPath: string;
   tokensPath: string;
-  modelKind?: 'single' | 'paraformer';
+  modelKind?: 'single' | 'paraformer' | 'transducer';
   encoderPath?: string | null;
   decoderPath?: string | null;
+  joinerPath?: string | null;
   bpeVocabPath?: string | null;
   hotwordsPath?: string | null;
 }
@@ -22,13 +23,15 @@ export function createRecognizerConfig(
   modelPath: string,
   tokensPath: string,
   provider: ProviderName = 'cpu',
-  numThreads: number = getDefaultNumThreads()
+  numThreads: number = getDefaultNumThreads(),
+  language: SenseVoiceLanguage = 'auto'
 ) {
   return {
     modelConfig: {
       senseVoice: {
         model: modelPath,
-        language: 'auto',
+        // 'auto' 会把普通话误判成粤语等；锁定 'zh' 修正。空串按 sherpa-onnx 语义即自动。
+        language: language === 'auto' ? '' : language,
         useItn: true,
       },
       tokens: tokensPath,
@@ -44,7 +47,8 @@ function createStreamingRecognizerConfig(
   provider: ProviderName,
   numThreads: number
 ) {
-  const isParaformer = Boolean(modelFiles.encoderPath && modelFiles.decoderPath);
+  const isTransducer = Boolean(modelFiles.encoderPath && modelFiles.decoderPath && modelFiles.joinerPath);
+  const isParaformer = !isTransducer && Boolean(modelFiles.encoderPath && modelFiles.decoderPath);
   const modelConfig: Record<string, unknown> = {
     tokens: modelFiles.tokensPath,
     numThreads,
@@ -52,7 +56,14 @@ function createStreamingRecognizerConfig(
     debug: false,
   };
 
-  if (isParaformer) {
+  if (isTransducer) {
+    // 中英双语流式 zipformer（transducer）：encoder + decoder + joiner，BPE 建模单元。
+    modelConfig.transducer = {
+      encoder: modelFiles.encoderPath,
+      decoder: modelFiles.decoderPath,
+      joiner: modelFiles.joinerPath,
+    };
+  } else if (isParaformer) {
     modelConfig.paraformer = {
       encoder: modelFiles.encoderPath,
       decoder: modelFiles.decoderPath,
@@ -65,19 +76,24 @@ function createStreamingRecognizerConfig(
     modelConfig.bpeVocab = modelFiles.bpeVocabPath ?? '';
   }
 
-  const canUseHotwords = Boolean(modelFiles.hotwordsPath && !isParaformer);
+  // transducer 用 BPE 热词需 bpeVocab；hotwords 仅在支持 modelingUnit 的模型上启用。
+  const canUseHotwords = Boolean(modelFiles.hotwordsPath && (isTransducer || (!isParaformer)));
+  // transducer 用 greedy_search + maxActivePaths=1 会出现严重的字符重复（"大大大大""咦咦咦咦"）。
+  // modified_beam_search 是标准的、更稳的解码，能抑制这种重复；对 transducer 始终启用。
+  const useBeamSearch = isTransducer || canUseHotwords;
   const config: Record<string, unknown> = {
     featConfig: {
       sampleRate: 16000,
       featureDim: 80,
     },
     modelConfig,
-    decodingMethod: canUseHotwords ? 'modified_beam_search' : 'greedy_search',
-    maxActivePaths: canUseHotwords ? 4 : 1,
+    decodingMethod: useBeamSearch ? 'modified_beam_search' : 'greedy_search',
+    maxActivePaths: useBeamSearch ? 4 : 1,
     enableEndpoint: true,
     rule1MinTrailingSilence: 1.8,
     rule2MinTrailingSilence: 0.8,
     rule3MinUtteranceLength: 12,
+    // 对 blank 施加轻微惩罚会增加吐字（可能加重重复）；这里保持 0，让 beam search 自己抑制重复。
     blankPenalty: 0,
   };
 
@@ -96,6 +112,7 @@ interface AsrEngineOptions {
   numThreads?: number;
   recognitionMode?: RecognitionMode;
   hotwordStatus?: AsrHotwordStatus;
+  senseVoiceLanguage?: SenseVoiceLanguage;
 }
 
 const DEFAULT_HOTWORD_STATUS: AsrHotwordStatus = {
@@ -148,7 +165,33 @@ function getModelFilesFromDirectory(modelDirectory: string): ModelFiles | null {
     path.join(modelDirectory, 'decoder.int8.onnx'),
     path.join(modelDirectory, 'decoder.onnx'),
   ].find((candidate) => fs.existsSync(candidate));
+  const joinerPath = [
+    path.join(modelDirectory, 'joiner.fp16.onnx'),
+    path.join(modelDirectory, 'joiner.int8.onnx'),
+    path.join(modelDirectory, 'joiner.onnx'),
+  ].find((candidate) => fs.existsSync(candidate));
   const tokensCandidate = path.join(modelDirectory, 'tokens.txt');
+  const bpeVocabPath = [
+    path.join(modelDirectory, 'bpe.model'),
+    path.join(modelDirectory, 'bbpe.model'),
+  ].find((candidate) => fs.existsSync(candidate)) ?? null;
+  const hotwordsPath = fs.existsSync(path.join(modelDirectory, 'hotwords.txt'))
+    ? path.join(modelDirectory, 'hotwords.txt')
+    : null;
+
+  // 有 joiner = transducer（中英双语流式 zipformer）。
+  if (encoderPath && decoderPath && joinerPath && fs.existsSync(tokensCandidate)) {
+    return {
+      modelPath: encoderPath,
+      tokensPath: tokensCandidate,
+      modelKind: 'transducer',
+      encoderPath,
+      decoderPath,
+      joinerPath,
+      bpeVocabPath,
+      hotwordsPath,
+    };
+  }
 
   if (encoderPath && decoderPath && fs.existsSync(tokensCandidate)) {
     return {
@@ -158,9 +201,7 @@ function getModelFilesFromDirectory(modelDirectory: string): ModelFiles | null {
       encoderPath,
       decoderPath,
       bpeVocabPath: null,
-      hotwordsPath: fs.existsSync(path.join(modelDirectory, 'hotwords.txt'))
-        ? path.join(modelDirectory, 'hotwords.txt')
-        : null,
+      hotwordsPath,
     };
   }
 
@@ -177,6 +218,7 @@ function hasOnlyAsciiModelPaths(modelFiles: ModelFiles): boolean {
     isAsciiPath(modelFiles.tokensPath) &&
     (!modelFiles.encoderPath || isAsciiPath(modelFiles.encoderPath)) &&
     (!modelFiles.decoderPath || isAsciiPath(modelFiles.decoderPath)) &&
+    (!modelFiles.joinerPath || isAsciiPath(modelFiles.joinerPath)) &&
     (!modelFiles.bpeVocabPath || isAsciiPath(modelFiles.bpeVocabPath)) &&
     (!modelFiles.hotwordsPath || isAsciiPath(modelFiles.hotwordsPath))
   );
@@ -335,6 +377,7 @@ export class AsrEngine {
   private recognitionMode: RecognitionMode;
   private modelFiles: ModelFiles | null;
   private hotwordStatus: AsrHotwordStatus;
+  private senseVoiceLanguage: SenseVoiceLanguage;
 
   constructor(modelFiles: ModelFiles | null = null, options: AsrEngineOptions = {}) {
     this.modelFiles = modelFiles;
@@ -342,6 +385,7 @@ export class AsrEngine {
     this.numThreads = options.numThreads ?? getDefaultNumThreads();
     this.recognitionMode = options.recognitionMode ?? 'non_streaming';
     this.hotwordStatus = options.hotwordStatus ?? DEFAULT_HOTWORD_STATUS;
+    this.senseVoiceLanguage = options.senseVoiceLanguage ?? 'auto';
   }
 
   async initialize(): Promise<void> {
@@ -392,7 +436,8 @@ export class AsrEngine {
             this.modelFiles.modelPath,
             this.modelFiles.tokensPath,
             provider,
-            this.numThreads
+            this.numThreads,
+            this.senseVoiceLanguage
           );
           this.recognizer =
             typeof sherpaOnnx.OfflineRecognizer.createAsync === 'function'

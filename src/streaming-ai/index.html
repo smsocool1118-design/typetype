@@ -5,6 +5,34 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>typetype AI 整理</title>
     <link rel="stylesheet" href="../shared/base.css" />
+    <style>
+      .streaming-ai-shell { min-width: 340px; }
+      .streaming-ai-actions { overflow-x: auto; padding-bottom: 2px; }
+      .streaming-ai-template select { max-width: 210px; }
+      /* 迷你竖窗：整体小字，原文 + 结构化参考两块竖排各占约一半高、可分别滚动。 */
+      .panel-mini { font-size: 12px; }
+      .panel-mini .streaming-ai-layout { height: 100vh; display: flex; flex-direction: column; min-height: 0; }
+      .panel-mini .streaming-ai-header { padding: 8px 10px; }
+      .panel-mini .streaming-ai-header h1, .panel-mini .streaming-ai-header .settings-kicker, .panel-mini .streaming-ai-status { display: none; }
+      .panel-mini .streaming-ai-actions { width: 100%; gap: 6px; }
+      .panel-mini .streaming-ai-template span, .panel-mini #copy-raw-button, .panel-mini #clear-button, .panel-mini #weekly-report-button { display: none; }
+      .panel-mini .streaming-ai-columns { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; gap: 8px; padding: 0 10px 10px; overflow: hidden; }
+      .panel-mini .streaming-ai-pane { flex: 1 1 50%; min-height: 0; display: flex; flex-direction: column; }
+      .panel-mini .streaming-ai-pane-heading h2 { font-size: 12px; margin: 0; }
+      .panel-mini .streaming-ai-text { flex: 1 1 auto; min-height: 0; max-height: none; overflow: auto; font-size: 12px; line-height: 1.55; }
+      .panel-standard .workbench-only, .panel-mini .workbench-only { display: none; }
+      .panel-workbench .streaming-ai-header { display: grid; grid-template-columns: minmax(0, 1fr); }
+      .panel-workbench .streaming-ai-actions { justify-content: flex-start; }
+      .streaming-workbench { padding: 0 18px 16px; }
+      .streaming-workbench-actions { display: grid; grid-template-columns: repeat(6, minmax(100px, 1fr)); gap: 8px; }
+      .streaming-workbench-actions button { min-height: 38px; }
+      @media (max-width: 700px) {
+        .streaming-ai-header { padding: 12px; }
+        .streaming-ai-columns { grid-template-columns: 1fr; overflow: auto; }
+        .streaming-ai-actions { width: 100%; }
+        .streaming-workbench-actions { grid-template-columns: repeat(2, minmax(100px, 1fr)); }
+      }
+    </style>
   </head>
   <body class="streaming-ai-shell">
     <main class="streaming-ai-layout">
@@ -62,8 +90,20 @@
               </optgroup>
             </select>
           </label>
+          <label class="streaming-ai-template workbench-only">
+            <span>行业包</span>
+            <select id="streaming-industry-select"></select>
+          </label>
+          <label class="streaming-ai-template">
+            <span>面板</span>
+            <select id="streaming-panel-mode-select">
+              <option value="mini">迷你</option><option value="standard">标准</option><option value="workbench">工作台</option>
+            </select>
+          </label>
           <button type="button" class="settings-secondary-button" id="copy-raw-button">复制原文</button>
           <button type="button" class="settings-secondary-button" id="copy-ai-button">复制整理稿</button>
+          <button type="button" class="settings-secondary-button" id="export-docx-button">导出公文 Word</button>
+          <button type="button" class="settings-secondary-button" id="weekly-report-button">本周汇总</button>
           <button type="button" class="settings-secondary-button" id="clear-button">清空本次记录</button>
         </div>
       </header>
@@ -88,7 +128,7 @@
 
         <article class="streaming-ai-pane">
           <div class="streaming-ai-pane-heading">
-            <h2>AI 纠错 / 会议纪要草稿</h2>
+            <h2 id="ai-pane-title">AI 结构化整理稿</h2>
             <div class="streaming-ai-inline-actions">
               <span id="ai-count">0 字</span>
               <button type="button" class="settings-secondary-button" id="apply-ai-button">一键带入整理稿</button>
@@ -96,6 +136,16 @@
           </div>
           <pre id="ai-text" class="streaming-ai-text empty">检测到停顿后，会在这里生成纠错稿或会议纪要草稿。</pre>
         </article>
+      </section>
+      <section class="streaming-workbench workbench-only">
+        <div class="streaming-workbench-actions">
+          <button type="button" class="settings-secondary-button" data-office-action="raw">原文</button>
+          <button type="button" class="settings-secondary-button" data-office-action="corrected">修正稿</button>
+          <button type="button" class="settings-secondary-button" data-office-action="formal">结构化参考</button>
+          <button type="button" class="settings-secondary-button" data-office-action="todo">待办</button>
+          <button type="button" class="settings-secondary-button" data-office-action="risk">风险点</button>
+          <button type="button" class="settings-secondary-button" data-office-action="reply">下一步回复</button>
+        </div>
       </section>
     </main>
 
@@ -111,11 +161,47 @@
         const rawCount = document.querySelector("#raw-count");
         const aiCount = document.querySelector("#ai-count");
         const scenarioSelect = document.querySelector("#streaming-scenario-select");
+        const industrySelect = document.querySelector("#streaming-industry-select");
+        const panelModeSelect = document.querySelector("#streaming-panel-mode-select");
+        const aiPaneTitle = document.querySelector("#ai-pane-title");
         const copyRawButton = document.querySelector("#copy-raw-button");
         const copyAiButton = document.querySelector("#copy-ai-button");
+        const exportDocxButton = document.querySelector("#export-docx-button");
+        const weeklyReportButton = document.querySelector("#weekly-report-button");
         const clearButton = document.querySelector("#clear-button");
         const applyRefinedRawButton = document.querySelector("#apply-refined-raw-button");
         const applyAiButton = document.querySelector("#apply-ai-button");
+        let selectedOfficeAction = "formal";
+        let lastState = null;
+
+        async function populateCatalog() {
+          const catalog = await electronAPI.getOfficeTemplateCatalog();
+          const groups = new Map();
+          for (const template of catalog.templates || []) {
+            if (!groups.has(template.group)) groups.set(template.group, []);
+            groups.get(template.group).push(template);
+          }
+          scenarioSelect.innerHTML = "";
+          for (const [label, templates] of groups) {
+            const group = document.createElement("optgroup");
+            group.label = label;
+            for (const template of templates) {
+              const option = document.createElement("option");
+              option.value = template.id;
+              option.textContent = template.name;
+              group.append(option);
+            }
+            scenarioSelect.append(group);
+          }
+          industrySelect.innerHTML = "";
+          for (const pack of catalog.industry_packs || []) {
+            const option = document.createElement("option");
+            option.value = pack.id;
+            option.textContent = pack.name;
+            industrySelect.append(option);
+          }
+          if (lastState) render(lastState);
+        }
 
         function statusTitleFor(status) {
           switch (status) {
@@ -154,6 +240,9 @@
         }
 
         function render(state) {
+          lastState = state;
+          document.body.classList.remove("panel-mini", "panel-standard", "panel-workbench");
+          document.body.classList.add(`panel-${state.panel_mode || "standard"}`);
           statusCard.dataset.tone = toneFor(state.status);
           statusTitle.textContent = statusTitleFor(state.status);
           statusText.textContent = cleanStatusText(state.status_text);
@@ -161,21 +250,41 @@
             ? `最近整理：${new Date(state.last_review_at).toLocaleTimeString()}`
             : "尚未整理";
           const applyText = state.apply_status_text ? ` · ${state.apply_status_text}` : "";
-          statusMeta.textContent = `${state.mode_label || "流式模式"} · ${state.rewrite_scenario_label || "通用整理"} · ${state.ai_status_label || "等待"} · ${reviewText}${applyText}`;
+          // 提示稿件里还有哪些要素是"待补充"，用户可用「修订当前稿件」逐项补全。
+          const pending = Array.isArray(state.pending_placeholders) ? state.pending_placeholders : [];
+          const pendingText = pending.length > 0
+            ? ` · 待补充 ${pending.length} 项：${pending.join("、")}`
+            : "";
+          statusMeta.textContent = `${state.mode_label || "流式模式"} · ${state.industry_pack_label || "通用办公"} · ${state.rewrite_scenario_label || "通用整理"} · ${state.ai_status_label || "等待"} · ${reviewText}${applyText}${pendingText}`;
 
           const refinedRaw = state.refined_raw_text?.trim() ? state.refined_raw_text : state.raw_text;
+          const actionResult = officeActionText(state, selectedOfficeAction);
           renderText(rawText, refinedRaw, "等待 AI 修正原文…");
-          renderText(aiText, state.ai_text, "检测到停顿后，会在这里生成纠错稿或会议纪要草稿。");
+          renderText(aiText, actionResult.text, "检测到停顿后，会在这里生成结构化整理稿。");
+          aiPaneTitle.textContent = actionResult.label;
           if (scenarioSelect && state.rewrite_scenario && scenarioSelect.value !== state.rewrite_scenario) {
             scenarioSelect.value = state.rewrite_scenario;
           }
+          if (industrySelect && state.industry_pack) industrySelect.value = state.industry_pack;
+          if (panelModeSelect && state.panel_mode) panelModeSelect.value = state.panel_mode;
           rawCount.textContent = `${refinedRaw?.length ?? 0} 字`;
-          aiCount.textContent = `${state.ai_text?.length ?? 0} 字`;
+          aiCount.textContent = `${actionResult.text?.length ?? 0} 字`;
           copyRawButton.disabled = !(refinedRaw?.trim());
           copyAiButton.disabled = !(state.ai_text?.trim());
           clearButton.disabled = !(refinedRaw?.trim() || state.ai_text?.trim());
           applyRefinedRawButton.disabled = !(state.can_apply_refined_raw && refinedRaw?.trim());
           applyAiButton.disabled = !(state.ai_text?.trim());
+        }
+
+        function officeActionText(state, action) {
+          const corrected = state.refined_raw_text?.trim() || state.raw_text?.trim() || "";
+          const formal = state.ai_text?.trim() || corrected;
+          if (action === "raw") return { label: "原文", text: state.raw_text || "" };
+          if (action === "corrected") return { label: "修正稿", text: corrected };
+          if (action === "todo") return { label: "待办", text: formal.split(/[。；\n]/).filter((line) => /(需要|请|应当|负责|截止|完成|跟进)/.test(line)).join("\n") };
+          if (action === "risk") return { label: "风险点", text: formal.split(/[。；\n]/).filter((line) => /(风险|问题|隐患|异常|不足|延误)/.test(line)).join("\n") };
+          if (action === "reply") return { label: "下一步回复", text: formal ? "已收到。将根据上述事项继续推进，并及时反馈进展。" : "" };
+          return { label: "结构化参考", text: formal };
         }
 
         function renderDisconnected(message) {
@@ -215,14 +324,55 @@
           void callAndRender(() => electronAPI.applyStreamingAiSummary());
         });
 
+        exportDocxButton.addEventListener("click", async () => {
+          exportDocxButton.disabled = true;
+          try {
+            const title = (lastState?.raw_text || lastState?.ai_text || "")
+              .replace(/\s+/g, " ").trim().slice(0, 24);
+            const result = await electronAPI.exportOfficeDocx({
+              title,
+              content: aiText.textContent || "",
+            });
+            if (result?.ok) {
+              statusText.textContent = `已导出公文 Word：${result.path}`;
+            } else if (result?.error) {
+              statusText.textContent = result.error;
+            }
+          } finally {
+            exportDocxButton.disabled = false;
+          }
+        });
+
+        weeklyReportButton.addEventListener("click", async () => {
+          weeklyReportButton.disabled = true;
+          try {
+            await callAndRender(() => electronAPI.generateWeeklyReport());
+          } finally {
+            weeklyReportButton.disabled = false;
+          }
+        });
+
         scenarioSelect.addEventListener("change", () => {
           void callAndRender(() => electronAPI.setStreamingAiScenario(scenarioSelect.value));
         });
+        industrySelect.addEventListener("change", () => {
+          void callAndRender(() => electronAPI.setIndustryPack(industrySelect.value));
+        });
+        panelModeSelect.addEventListener("change", () => {
+          void callAndRender(() => electronAPI.setOfficePanelMode(panelModeSelect.value));
+        });
+        for (const button of document.querySelectorAll("[data-office-action]")) {
+          button.addEventListener("click", () => {
+            selectedOfficeAction = button.dataset.officeAction;
+            if (lastState) render(lastState);
+          });
+        }
 
         clearButton.addEventListener("click", () => {
           void callAndRender(() => electronAPI.clearStreamingAiPanel());
         });
 
+        void populateCatalog().catch(() => {});
         electronAPI.subscribeStreamingAiPanelState(render);
 
         window.setInterval(() => {

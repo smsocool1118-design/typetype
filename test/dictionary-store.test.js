@@ -52,3 +52,35 @@ test("system lexicon switches are visible, persisted, and filter matched terms",
 
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
+
+// 0.6.3：行业包按类目从系统大词库借词——只回文本命中的词。
+test("0.6.3: 按类目取系统词库里命中的词", () => {
+  const { tempDir, store } = createStoreFixture();
+  try {
+    const matched = store.getMatchedSystemTermsByCategories(
+      "今天的会议纪要里提到了 DeepSeek 的部署问题",
+      ["IT/AI"]
+    );
+    assert.deepEqual(matched, ["DeepSeek"]);
+
+    // 类目不对就一条都不给，不会把别的领域词混进来。
+    assert.deepEqual(store.getMatchedSystemTermsByCategories("DeepSeek", ["医学/健康"]), []);
+    // 没传类目 = 该行业在大词库里没有对应领域（监狱、公安等）。
+    assert.deepEqual(store.getMatchedSystemTermsByCategories("DeepSeek", []), []);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("0.6.3: 关闭的系统类目不再向行业包供词", () => {
+  const { tempDir, store } = createStoreFixture();
+  try {
+    store.setSystemCategoryEnabled("IT/AI", false);
+    assert.deepEqual(store.getMatchedSystemTermsByCategories("DeepSeek 部署", ["IT/AI"]), []);
+
+    store.setSystemLexiconEnabled(false);
+    assert.deepEqual(store.getMatchedSystemTermsByCategories("会议纪要", ["办公/会议"]), []);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});

@@ -24,7 +24,9 @@ test("StreamingRealtimeTextProcessor keeps partial work inside the tail window",
     },
   }, { tailWindowChars: 120 });
 
-  const raw = `${"前".repeat(180)}我的手机号是一三八一二三四五六七八`;
+  // 用循环的多字填充（避免被 collapseRunawayRepetition 折叠掉），凑够 >120 字触发尾窗。
+  const filler = "甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥".repeat(9); // 22*9=198 字
+  const raw = `${filler}我的手机号是一三八一二三四五六七八`;
   const result = processor.processPartial(raw, createSettings());
 
   assert.equal(result.displayDelta.includes("我的手机号是一三八"), true);
@@ -105,6 +107,41 @@ test("StreamingRealtimeTextProcessor normalizes percent markers in streaming tai
   assert.equal(droppedMarkerDecimal.includes("76.3%"), true);
 });
 
+test("model revision does not duplicate whole segments (0.5.0 dedup fix)", () => {
+  const processor = new StreamingRealtimeTextProcessor({
+    textNormalizationEngine: new TextNormalizationEngine(),
+    applyDictionary(text) { return text; },
+    applyCodeSwitch(text) { return { text, matchedTerms: [], replacementCount: 0, highRiskCount: 0 }; },
+  });
+
+  // 第二次假设回改了早期字（门→迎）且更长 → 旧逻辑会把整段 current 再拼一遍造成重复。
+  processor.processPartial("我们站在天安门", createSettings());
+  const r = processor.processPartial("我们站在天安迎想理的起航致敬传媒", createSettings());
+
+  // "我们站在天安" 不应出现两次（无整段重复）。
+  assert.equal((r.realtimeText.match(/我们站在天安/g) || []).length, 1);
+});
+
+test("pure-append pause punctuation produces a non-null tailCorrection (0.4.3 fix)", () => {
+  const processor = new StreamingRealtimeTextProcessor({
+    textNormalizationEngine: new TextNormalizationEngine(),
+    applyDictionary(text) { return text; },
+    applyCodeSwitch(text) { return { text, matchedTerms: [], replacementCount: 0, highRiskCount: 0 }; },
+  });
+
+  // 硬停顿、句末完整 → 稳定段追加句号；这个"纯追加标点"以前 charsToReplace=0 被吞掉，现在必须出修正。
+  const result = processor.processPartial("那就是快下了", createSettings(), {
+    stablePause: true,
+    pauseReason: "hard_pause",
+    pauseMs: 760,
+  });
+
+  assert.notEqual(result.tailCorrection, null);
+  assert.equal(result.tailCorrection.charsToReplace, 0);
+  assert.equal(result.tailCorrection.replacementText, "。");
+  assert.equal(result.stableText.endsWith("。"), true);
+});
+
 test("StreamingRealtimeTextProcessor uses comma for stable pauses instead of mechanical periods", () => {
   const processor = new StreamingRealtimeTextProcessor({
     textNormalizationEngine: new TextNormalizationEngine(),
@@ -116,6 +153,7 @@ test("StreamingRealtimeTextProcessor uses comma for stable pauses instead of mec
     },
   });
 
+  // 0.5.0：软停顿不再机械加句号，也不再在任意停顿处加逗号（避免把词从中间切开，如"飞，翔"）。
   const result = processor.processPartial(
     "下一个重点是讨论一下要怎么让更新通过线上更新来处理",
     createSettings(),
@@ -124,7 +162,22 @@ test("StreamingRealtimeTextProcessor uses comma for stable pauses instead of mec
 
   assert.equal(result.stableText.endsWith("。"), false);
   assert.equal(result.stableText.includes("。重点是"), false);
-  assert.equal(/[，,]$/.test(result.stableText), true);
+});
+
+test("no comma is inserted mid-word on an arbitrary pause (0.5.0: fixes 飞，翔)", () => {
+  const processor = new StreamingRealtimeTextProcessor({
+    textNormalizationEngine: new TextNormalizationEngine(),
+    applyDictionary(text) { return text; },
+    applyCodeSwitch(text) { return { text, matchedTerms: [], replacementCount: 0, highRiskCount: 0 }; },
+  });
+  // 软停顿（无转折词、无句末完整）→ 不应加任何逗号/句号，避免切词。
+  const r = processor.processPartial("我看见一只乌鸦在天空中飞翔", createSettings(), {
+    stablePause: true,
+    pauseReason: "soft_pause",
+    pauseMs: 450,
+  });
+  assert.equal(/[，,。]/.test(r.stableText), false);
+  assert.equal(r.stableText.includes("飞翔"), true);
 });
 
 test("StreamingRealtimeTextProcessor applies soft and hard pause punctuation differently", () => {

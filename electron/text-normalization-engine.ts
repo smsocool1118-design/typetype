@@ -72,6 +72,8 @@ export class TextNormalizationEngine {
       ...(options.preserveTerms ?? []).filter(shouldPreserveExternalTerm),
     ]);
 
+    working = collapseNumberUnitSpacing(working);
+    working = mergeGluedChineseArabicYear(working);
     working = normalizeVersionNumbers(working);
     working = normalizePhoneNumbers(working, mode);
     working = normalizeIdentifierNumbers(working, mode);
@@ -187,7 +189,8 @@ function normalizeDates(text: string): string {
 
 function normalizeTimes(text: string): string {
   const daypart = '(凌晨|清晨|早上|上午|中午|下午|傍晚|晚上|今晚|明早|明天上午|明天下午|明天晚上)?';
-  const timePattern = new RegExp(`${daypart}(${CN_NUMBER_RE}{1,3})点(半|${CN_NUMBER_RE}{1,3}分|${CN_NUMBER_RE}{1,3})?`, 'gu');
+  // (?<!第) 保护序数：`第三点`（第三条/点意见）不当作`3点`时间，第一/第二/第三保持汉字。
+  const timePattern = new RegExp(`${daypart}(?<!第)(${CN_NUMBER_RE}{1,3})点(半|${CN_NUMBER_RE}{1,3}分|${CN_NUMBER_RE}{1,3})?`, 'gu');
   let result = text.replace(timePattern, (match, prefix: string | undefined, hourText: string, suffix: string | undefined) => {
     const hour = parseChineseInteger(hourText);
     if (hour === null || hour < 0 || hour > 24) {
@@ -430,6 +433,21 @@ function normalizeMoney(text: string): string {
     const value = parseChineseInteger(amountText);
     return value !== null && value > 0 ? `${value}${unit}` : match;
   });
+}
+
+function collapseNumberUnitSpacing(text: string): string {
+  // 去掉阿拉伯数字与其后紧跟的中文日期/量词单位之间的空格：`8 月 2 日` -> `8月2日`、`30 %` -> `30%`。
+  // 仅处理单位字符，不合并两个独立数字之间的空格（避免把 `3 5` 误并成 `35`）。
+  return text
+    .replace(/(\d)[ \t]+(?=[年月日号点分秒个只名位次条项元块角分钟%‰‱])/gu, '$1')
+    .replace(/([年月日号点])[ \t]+(?=\d)/gu, '$1')
+    .replace(/(\d)[ \t]+(?=[.．]\d)/gu, '$1');
+}
+
+function mergeGluedChineseArabicYear(text: string): string {
+  // ASR 有时把 `二零二六年` 输出成中文数字前缀直接粘连阿拉伯数字（`二零2026年`），
+  // 这里丢弃冗余的中文数字前缀，保留阿拉伯年份：`二零2026年` -> `2026年`。
+  return text.replace(new RegExp(`${CN_DIGIT_RE}{1,4}(\\d{2,4})(?=年)`, 'gu'), '$1');
 }
 
 function normalizeVersionNumbers(text: string): string {

@@ -328,9 +328,11 @@ function dedupe(values: string[]): string[] {
 }
 
 function normalizeMixedSpacing(text: string): string {
+  // 仅在含字母的拉丁词（如 GPT、API、GPT-4）与中文之间加空格；纯数字与中文量词/日期单位
+  // （8月、2日、10个、5元、2026年）之间不加空格，避免把阿拉伯数字与其单位拆开。
   return text
-    .replace(new RegExp(`(${CJK_RE.source})([A-Za-z][A-Za-z0-9.+#/_-]*)`, 'gu'), '$1 $2')
-    .replace(new RegExp(`([A-Za-z0-9.+#/_-]+)(${CJK_RE.source})`, 'gu'), '$1 $2')
+    .replace(new RegExp(`(${CJK_RE.source})([A-Za-z0-9.+#/_-]*[A-Za-z][A-Za-z0-9.+#/_-]*)`, 'gu'), '$1 $2')
+    .replace(new RegExp(`([A-Za-z0-9.+#/_-]*[A-Za-z][A-Za-z0-9.+#/_-]*)(${CJK_RE.source})`, 'gu'), '$1 $2')
     .replace(/[ \t]{2,}/gu, ' ')
     .replace(/\s+([，。！？；：、])/gu, '$1')
     .replace(/([（【《])\s+/gu, '$1')

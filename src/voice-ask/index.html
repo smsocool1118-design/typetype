@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>typetype 语音问答</title>
+  <style>
+    :root { color-scheme: light; font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif; color: #18212d; background: #f5f6f7; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 440px; min-height: 300px; }
+    main { height: 100vh; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; }
+    header { padding: 16px 18px 12px; border-bottom: 1px solid #dfe3e8; background: #fff; }
+    header small { color: #687486; }
+    h1 { margin: 4px 0 0; font-size: 21px; letter-spacing: 0; }
+    .toolbar { display: flex; gap: 8px; align-items: center; padding: 10px 18px; background: #fff; border-bottom: 1px solid #e4e7eb; overflow-x: auto; }
+    select, button { min-height: 36px; border: 1px solid #d7dce2; background: #fff; color: #18212d; border-radius: 6px; padding: 0 12px; font: inherit; white-space: nowrap; }
+    button { cursor: pointer; font-weight: 600; }
+    button.primary { background: #176b57; color: #fff; border-color: #176b57; }
+    .content { min-height: 0; overflow: auto; padding: 14px 18px 20px; }
+    .status { margin: 0 0 12px; color: #5f6b7a; font-size: 13px; }
+    .context { margin: 0 0 12px; padding: 10px 12px; border-left: 3px solid #8b9aaa; background: #eef1f3; color: #465363; white-space: pre-wrap; }
+    .question { margin: 0 0 12px; font-weight: 600; white-space: pre-wrap; }
+    .answer { margin: 0; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
+    .empty { color: #7a8491; }
+    .error { color: #b42318; }
+    .setup { margin: 0 0 14px; padding: 14px; border: 1px solid #f0c9c0; border-radius: 8px; background: #fdf3f1; color: #7a2b1d; }
+    .setup p { margin: 0 0 10px; line-height: 1.6; }
+    footer { display: flex; gap: 8px; padding: 10px 18px; border-top: 1px solid #dfe3e8; background: #fff; overflow-x: auto; }
+    /* 多对话：左侧会话列表 + 右侧当前会话问答流 */
+    .body-split { display: grid; grid-template-columns: 190px minmax(0, 1fr); min-height: 0; }
+    .sidebar { border-right: 1px solid #e4e7eb; background: #fafbfc; display: flex; flex-direction: column; min-height: 0; }
+    .sidebar-head { display: flex; gap: 6px; padding: 8px; border-bottom: 1px solid #e9edf1; }
+    .sidebar-head button { min-height: 30px; padding: 0 8px; font-size: 12px; flex: 1 1 auto; }
+    .conv-list { flex: 1 1 auto; overflow: auto; min-height: 0; }
+    .conv-item { padding: 8px 10px; border-bottom: 1px solid #eef1f4; cursor: pointer; font-size: 12px; line-height: 1.4; }
+    .conv-item:hover { background: #f0f3f6; }
+    .conv-item.active { background: #e6f0ec; border-left: 3px solid #176b57; }
+    .conv-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .conv-meta { color: #8a94a1; font-size: 11px; margin-top: 2px; }
+    .conv-empty { padding: 12px 10px; color: #8a94a1; font-size: 12px; }
+    /* 问答流 */
+    .thread { display: flex; flex-direction: column; gap: 10px; }
+    .thread[hidden] { display: none; }  /* 类规则会盖掉 [hidden] 的 UA 样式，必须显式声明 */
+    .msg { padding: 9px 11px; border-radius: 8px; white-space: pre-wrap; word-break: break-word; line-height: 1.65; }
+    .msg-user { background: #e6f0ec; align-self: flex-end; max-width: 88%; }
+    .msg-assistant { background: #fff; border: 1px solid #e4e7eb; align-self: flex-start; max-width: 96%; }
+    .msg-role { font-size: 11px; color: #8a94a1; margin-bottom: 3px; }
+    .msg-copy { margin-top: 6px; font-size: 11px; min-height: 24px; padding: 0 8px; }
+    @media (max-width: 440px) { .body-split { grid-template-columns: 1fr; } .sidebar { display: none; } }
+    @media (max-width: 460px) { header, .toolbar, .content, footer { padding-left: 12px; padding-right: 12px; } h1 { font-size: 18px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header><small>语音办公助手</small><h1>直接问，直接办</h1></header>
+    <div class="toolbar">
+      <select id="action" aria-label="问答动作">
+        <option value="answer">直接回答</option><option value="explain">解释</option>
+        <option value="summarize">总结</option><option value="todo">提炼待办</option>
+        <option value="reply">生成回复</option><option value="formal">改正式</option>
+        <option value="casual">改口语</option><option value="outline">列提纲</option>
+        <option value="proposal">生成方案</option>
+        <option value="revise">修订当前稿件</option>
+      </select>
+      <button id="continue" class="primary">开始 / 继续追问</button>
+    </div>
+    <div class="body-split">
+      <aside class="sidebar">
+        <div class="sidebar-head">
+          <button id="conv-new">新建对话</button>
+          <button id="conv-rename" title="重命名当前对话">改名</button>
+          <button id="conv-delete" title="删除当前对话">删除</button>
+        </div>
+        <div class="conv-list" id="conv-list"></div>
+      </aside>
+      <section class="content">
+        <p class="status" id="status">按 Ctrl + Alt + Space 开始提问。</p>
+        <div class="setup" id="setup" hidden>
+          <p>语音问答需要先配置国产 AI（如 DeepSeek）并填写 API Key，才能回答你的问题。</p>
+          <button id="open-settings" class="primary">打开设置去配置</button>
+        </div>
+        <div class="context" id="context" hidden></div>
+        <div class="thread" id="thread"></div>
+      </section>
+    </div>
+    <footer>
+      <input type="text" id="typed-question" placeholder="也可以打字或粘贴问题，回车发送" style="flex: 1 1 auto; min-width: 160px; min-height: 36px; border: 1px solid #d7dce2; border-radius: 6px; padding: 0 12px; font: inherit;" />
+      <button id="send" class="primary">发送</button>
+      <button id="copy">复制</button>
+      <button id="apply">一键带入</button>
+    </footer>
+  </main>
+  <script>
+    const api = window.electronAPI;
+    const action = document.querySelector('#action');
+    const status = document.querySelector('#status');
+    const context = document.querySelector('#context');
+    const thread = document.querySelector('#thread');
+    const convList = document.querySelector('#conv-list');
+    const setup = document.querySelector('#setup');
+    const typedQuestion = document.querySelector('#typed-question');
+    const sendButton = document.querySelector('#send');
+    let currentState = { conversations: [], messages: [], conversation_id: null };
+    const labels = { idle: '等待提问', recording: '正在录音，再按一次快捷键结束', thinking: '正在整理答案', ready: '回答已就绪', error: '本次问答未完成' };
+    function render(state) {
+      currentState = state;
+      action.value = state.action || 'answer';
+      status.textContent = state.error || labels[state.status] || '等待提问';
+      status.classList.toggle('error', Boolean(state.error));
+      const needsConfig = Boolean(state.needs_llm_config);
+      setup.hidden = !needsConfig;
+      context.hidden = needsConfig || !state.context_text;
+      const contextLabel = state.action === 'revise' ? '待修订稿件' : '已读取选中文本';
+      context.textContent = state.context_text ? `${contextLabel}：\n${state.context_text}` : '';
+      thread.hidden = needsConfig;
+      renderConversations(state);
+      renderThread(state);
+      // 生成中禁止重复发送。
+      sendButton.disabled = state.status === 'thinking';
+    }
+    // 左侧对话列表：点击切换，当前对话高亮。
+    function renderConversations(state) {
+      const items = state.conversations || [];
+      convList.textContent = '';
+      if (!items.length) {
+        const empty = document.createElement('div');
+        empty.className = 'conv-empty';
+        empty.textContent = '还没有对话，提问后会自动创建。';
+        convList.appendChild(empty);
+        return;
+      }
+      for (const item of items) {
+        const row = document.createElement('div');
+        row.className = 'conv-item' + (item.id === state.conversation_id ? ' active' : '');
+        row.dataset.id = item.id;
+        const title = document.createElement('div');
+        title.className = 'conv-title';
+        title.textContent = item.title || '新对话';
+        const meta = document.createElement('div');
+        meta.className = 'conv-meta';
+        meta.textContent = `${item.message_count} 条 · ${formatTime(item.updated_at)}`;
+        row.append(title, meta);
+        row.addEventListener('click', () => api.selectVoiceAskConversation(item.id).then(render));
+        convList.appendChild(row);
+      }
+    }
+    // 右侧当前对话完整问答流；生成中在末尾补一条占位。
+    function renderThread(state) {
+      const messages = state.messages || [];
+      thread.textContent = '';
+      if (!messages.length && state.status !== 'thinking') {
+        const empty = document.createElement('p');
+        empty.className = 'answer empty';
+        empty.textContent = '回答会显示在这里。';
+        thread.appendChild(empty);
+        return;
+      }
+      for (const message of messages) {
+        thread.appendChild(buildMessage(message.role, message.content));
+      }
+      if (state.status === 'thinking') {
+        const pending = document.createElement('div');
+        pending.className = 'msg msg-assistant empty';
+        pending.textContent = '正在生成可交付结果…';
+        thread.appendChild(pending);
+      }
+      thread.parentElement.scrollTop = thread.parentElement.scrollHeight;
+    }
+    function buildMessage(role, content) {
+      const box = document.createElement('div');
+      box.className = `msg msg-${role}`;
+      const label = document.createElement('div');
+      label.className = 'msg-role';
+      label.textContent = role === 'user' ? '我' : '助手';
+      const body = document.createElement('div');
+      body.textContent = content;
+      box.append(label, body);
+      if (role === 'assistant') {
+        const copy = document.createElement('button');
+        copy.className = 'msg-copy';
+        copy.textContent = '复制';
+        copy.addEventListener('click', () => copyText(content, copy));
+        box.appendChild(copy);
+      }
+      return box;
+    }
+    function copyText(text, button) {
+      const done = () => { button.textContent = '已复制'; setTimeout(() => { button.textContent = '复制'; }, 1200); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, () => fallbackCopy(text, done));
+        return;
+      }
+      fallbackCopy(text, done);
+    }
+    function fallbackCopy(text, done) {
+      const area = document.createElement('textarea');
+      area.value = text;
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand('copy');
+      area.remove();
+      done();
+    }
+    function formatTime(iso) {
+      const date = new Date(iso);
+      if (Number.isNaN(date.getTime())) { return ''; }
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    }
+    // 改名走行内输入框：Electron 渲染进程不支持 window.prompt。
+    function startRename() {
+      if (!currentState.conversation_id) { return; }
+      const row = convList.querySelector('.conv-item.active');
+      const title = row && row.querySelector('.conv-title');
+      if (!title) { return; }
+      const id = currentState.conversation_id;
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = title.textContent;
+      input.style.cssText = 'width: 100%; font: inherit; border: 1px solid #176b57; border-radius: 4px; padding: 2px 4px;';
+      input.addEventListener('click', (event) => event.stopPropagation());
+      const commit = () => {
+        const next = input.value.trim();
+        if (!next || next === title.textContent) { render(currentState); return; }
+        api.renameVoiceAskConversation(id, next).then(render);
+      };
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && !event.isComposing) { commit(); }
+        if (event.key === 'Escape') { render(currentState); }
+      });
+      input.addEventListener('blur', commit);
+      title.replaceWith(input);
+      input.focus();
+      input.select();
+    }
+    function sendTypedQuestion() {
+      const text = typedQuestion.value.trim();
+      if (!text || sendButton.disabled) { return; }
+      typedQuestion.value = '';
+      api.askVoiceQuestionText(text).then(render);
+    }
+    action.addEventListener('change', () => api.setVoiceAskAction(action.value).then(render));
+    document.querySelector('#continue').addEventListener('click', () => api.startVoiceAsk());
+    document.querySelector('#open-settings').addEventListener('click', () => api.openSettings('llm'));
+    document.querySelector('#copy').addEventListener('click', () => api.copyVoiceAskAnswer());
+    document.querySelector('#apply').addEventListener('click', () => api.applyVoiceAskAnswer().then(render));
+    document.querySelector('#conv-new').addEventListener('click', () => api.createVoiceAskConversation().then(render));
+    document.querySelector('#conv-rename').addEventListener('click', startRename);
+    document.querySelector('#conv-delete').addEventListener('click', () => {
+      const id = currentState.conversation_id;
+      if (!id || !window.confirm('删除当前对话？该对话的全部问答记录将一并删除。')) { return; }
+      api.deleteVoiceAskConversation(id).then(render);
+    });
+    sendButton.addEventListener('click', sendTypedQuestion);
+    typedQuestion.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && !event.isComposing) { sendTypedQuestion(); }
+    });
+    api.subscribeVoiceAskState(render);
+  </script>
+</body>
+</html>

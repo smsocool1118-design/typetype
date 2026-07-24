@@ -10,3 +10,7 @@ typetype.log
 # Models (too large for GitHub)
 resources/models/
 resources/translation-models/
+
+# ARM64 build inputs — regenerable, and electron.exe (168MB) exceeds GitHub's 100MB limit.
+# Rebuilt by scripts/prepare-arm64-deps.cjs + Electron download (see docs/arm64-build.md).
+vendor/

@@ -11,17 +11,29 @@ import {
   DictionaryViewData,
   StreamingAiPanelState,
   RewriteScenario,
+  DictionaryProbeResult,
+  IndustryPackId,
+  OfficePanelMode,
+  OfficeTemplateCatalog,
+  OfficeHistoryItem,
+  OfficeWorkspaceResult,
+  ShortcutTestResult,
+  VoiceAskState,
+  IndustryTermStats,
+  IndustryTermImportResult,
 } from './types';
 
 export interface ElectronAPI {
   getSettingsViewData: () => Promise<SettingsViewData>;
   saveSettings: (settings: Settings) => Promise<UiSnapshot>;
-  openSettings: () => Promise<void>;
+  openSettings: (focus?: string) => Promise<void>;
+  subscribeSettingsFocus: (listener: (focus: string) => void) => () => void;
   openAccessibilitySettings: () => Promise<void>;
   openMicrophoneSettings: () => Promise<void>;
   openInputMonitoringSettings: () => Promise<void>;
   openLogDirectory: () => Promise<void>;
   openFeedbackEmail: () => Promise<void>;
+  openApiKeyPage: (providerKey: string) => Promise<void>;
   runAsrDiagnostics: () => Promise<AsrDiagnostics>;
   installRuntimeDependency: () => Promise<{ ok: boolean; message: string; exit_code?: number; log_path?: string }>;
   repairShortcutsAndRecorder: () => Promise<{ ok: boolean; message: string; shortcut_health: string; runtime_status: string; repaired: boolean }>;
@@ -39,6 +51,32 @@ export interface ElectronAPI {
   commitDictionaryImport: (preview: DictionaryImportPreview) => Promise<DictionaryViewData>;
   selectDictionaryImportFile: () => Promise<DictionaryImportPreview | null>;
   exportDictionary: () => Promise<{ ok: boolean; path?: string }>;
+  getOfficeTemplateCatalog: () => Promise<OfficeTemplateCatalog>;
+  organizeClipboardText: () => Promise<OfficeWorkspaceResult>;
+  organizeSelectedText: () => Promise<OfficeWorkspaceResult>;
+  importOfficeFile: () => Promise<OfficeWorkspaceResult>;
+  getOfficeHistory: () => Promise<OfficeHistoryItem[]>;
+  clearOfficeHistory: () => Promise<OfficeHistoryItem[]>;
+  exportOfficeDocx: (payload?: { title?: string; content?: string }) => Promise<{ ok: boolean; path?: string; error?: string }>;
+  generateWeeklyReport: () => Promise<StreamingAiPanelState>;
+  setOfficePanelMode: (mode: OfficePanelMode) => Promise<StreamingAiPanelState>;
+  setIndustryPack: (industryPack: IndustryPackId) => Promise<StreamingAiPanelState>;
+  probeDictionary: (text: string, industryPack: IndustryPackId) => Promise<DictionaryProbeResult>;
+  testShortcut: (actionId: 'dictation' | 'translation' | 'voice_ask') => Promise<ShortcutTestResult>;
+  getVoiceAskState: () => Promise<VoiceAskState>;
+  showVoiceAskPanel: () => Promise<VoiceAskState>;
+  startVoiceAsk: () => Promise<void>;
+  askVoiceQuestionText: (question: string) => Promise<VoiceAskState>;
+  setVoiceAskAction: (action: VoiceAskState['action']) => Promise<VoiceAskState>;
+  getIndustryTermStats: () => Promise<IndustryTermStats>;
+  importIndustryTerms: () => Promise<IndustryTermImportResult>;
+  clearIndustryTerms: () => Promise<IndustryTermStats>;
+  createVoiceAskConversation: () => Promise<VoiceAskState>;
+  selectVoiceAskConversation: (id: string) => Promise<VoiceAskState>;
+  renameVoiceAskConversation: (id: string, title: string) => Promise<VoiceAskState>;
+  deleteVoiceAskConversation: (id: string) => Promise<VoiceAskState>;
+  copyVoiceAskAnswer: () => Promise<VoiceAskState>;
+  applyVoiceAskAnswer: () => Promise<VoiceAskState>;
   getStreamingAiPanelState: () => Promise<StreamingAiPanelState>;
   showStreamingAiPanel: () => Promise<StreamingAiPanelState>;
   clearStreamingAiPanel: () => Promise<StreamingAiPanelState>;
@@ -50,18 +88,20 @@ export interface ElectronAPI {
   subscribeSnapshot: (listener: (snapshot: UiSnapshot) => void) => () => void;
   subscribeSettingsViewData: (listener: (view: SettingsViewData) => void) => () => void;
   subscribeStreamingAiPanelState: (listener: (state: StreamingAiPanelState) => void) => () => void;
+  subscribeVoiceAskState: (listener: (state: VoiceAskState) => void) => () => void;
   platform: string;
 }
 
 const api: ElectronAPI = {
   getSettingsViewData: () => ipcRenderer.invoke('get_settings_view_data'),
   saveSettings: (settings: Settings) => ipcRenderer.invoke('save_settings', { settings }),
-  openSettings: () => ipcRenderer.invoke('open_settings'),
+  openSettings: (focus?: string) => ipcRenderer.invoke('open_settings', { focus }),
   openAccessibilitySettings: () => ipcRenderer.invoke('open_accessibility_settings'),
   openMicrophoneSettings: () => ipcRenderer.invoke('open_microphone_settings'),
   openInputMonitoringSettings: () => ipcRenderer.invoke('open_input_monitoring_settings'),
   openLogDirectory: () => ipcRenderer.invoke('open_log_directory'),
   openFeedbackEmail: () => ipcRenderer.invoke('open_feedback_email'),
+  openApiKeyPage: (providerKey: string) => ipcRenderer.invoke('open_api_key_page', providerKey),
   runAsrDiagnostics: () => ipcRenderer.invoke('run_asr_diagnostics'),
   installRuntimeDependency: () => ipcRenderer.invoke('install_runtime_dependency'),
   repairShortcutsAndRecorder: () => ipcRenderer.invoke('repair_shortcuts_and_recorder'),
@@ -79,6 +119,32 @@ const api: ElectronAPI = {
   commitDictionaryImport: (preview: DictionaryImportPreview) => ipcRenderer.invoke('commit_dictionary_import', preview),
   selectDictionaryImportFile: () => ipcRenderer.invoke('select_dictionary_import_file'),
   exportDictionary: () => ipcRenderer.invoke('export_dictionary'),
+  getOfficeTemplateCatalog: () => ipcRenderer.invoke('get_office_template_catalog'),
+  organizeClipboardText: () => ipcRenderer.invoke('organize_clipboard_text'),
+  organizeSelectedText: () => ipcRenderer.invoke('organize_selected_text'),
+  importOfficeFile: () => ipcRenderer.invoke('import_office_file'),
+  getOfficeHistory: () => ipcRenderer.invoke('get_office_history'),
+  clearOfficeHistory: () => ipcRenderer.invoke('clear_office_history'),
+  exportOfficeDocx: (payload?: { title?: string; content?: string }) => ipcRenderer.invoke('export_office_docx', payload ?? {}),
+  generateWeeklyReport: () => ipcRenderer.invoke('generate_weekly_report'),
+  setOfficePanelMode: (mode: OfficePanelMode) => ipcRenderer.invoke('set_office_panel_mode', mode),
+  setIndustryPack: (industryPack: IndustryPackId) => ipcRenderer.invoke('set_industry_pack', industryPack),
+  probeDictionary: (text: string, industryPack: IndustryPackId) => ipcRenderer.invoke('probe_dictionary', { text, industryPack }),
+  testShortcut: (actionId: 'dictation' | 'translation' | 'voice_ask') => ipcRenderer.invoke('test_shortcut', actionId),
+  getVoiceAskState: () => ipcRenderer.invoke('get_voice_ask_state'),
+  showVoiceAskPanel: () => ipcRenderer.invoke('show_voice_ask_panel'),
+  startVoiceAsk: () => ipcRenderer.invoke('start_voice_ask'),
+  askVoiceQuestionText: (question: string) => ipcRenderer.invoke('ask_voice_question_text', question),
+  setVoiceAskAction: (action: VoiceAskState['action']) => ipcRenderer.invoke('set_voice_ask_action', action),
+  getIndustryTermStats: () => ipcRenderer.invoke('get_industry_term_stats'),
+  importIndustryTerms: () => ipcRenderer.invoke('import_industry_terms'),
+  clearIndustryTerms: () => ipcRenderer.invoke('clear_industry_terms'),
+  createVoiceAskConversation: () => ipcRenderer.invoke('create_voice_ask_conversation'),
+  selectVoiceAskConversation: (id: string) => ipcRenderer.invoke('select_voice_ask_conversation', id),
+  renameVoiceAskConversation: (id: string, title: string) => ipcRenderer.invoke('rename_voice_ask_conversation', { id, title }),
+  deleteVoiceAskConversation: (id: string) => ipcRenderer.invoke('delete_voice_ask_conversation', id),
+  copyVoiceAskAnswer: () => ipcRenderer.invoke('copy_voice_ask_answer'),
+  applyVoiceAskAnswer: () => ipcRenderer.invoke('apply_voice_ask_answer'),
   getStreamingAiPanelState: () => ipcRenderer.invoke('get_streaming_ai_panel_state'),
   showStreamingAiPanel: () => ipcRenderer.invoke('show_streaming_ai_panel'),
   clearStreamingAiPanel: () => ipcRenderer.invoke('clear_streaming_ai_panel'),
@@ -125,6 +191,21 @@ const api: ElectronAPI = {
     return () => {
       ipcRenderer.removeListener('streaming_ai_panel_updated', wrapped);
     };
+  },
+  subscribeVoiceAskState: (listener: (state: VoiceAskState) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, state: VoiceAskState) => {
+      listener(state);
+    };
+    ipcRenderer.on('voice_ask_updated', wrapped);
+    ipcRenderer.invoke('get_voice_ask_state').then((state: VoiceAskState) => listener(state));
+    return () => ipcRenderer.removeListener('voice_ask_updated', wrapped);
+  },
+  subscribeSettingsFocus: (listener: (focus: string) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, focus: string) => {
+      listener(focus);
+    };
+    ipcRenderer.on('settings_focus', wrapped);
+    return () => ipcRenderer.removeListener('settings_focus', wrapped);
   },
   platform: process.platform,
 };

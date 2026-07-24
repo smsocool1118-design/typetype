@@ -13,12 +13,13 @@
           <div class="settings-brand-mark">TY</div>
           <div>
             <h1>typetype</h1>
-            <p>本地语音输入</p>
+            <p>语音办公工作台</p>
           </div>
         </div>
 
         <nav class="settings-nav" aria-label="设置导航">
           <button type="button" class="settings-nav-item is-active" data-panel-target="panel-general">设置</button>
+          <button type="button" class="settings-nav-item" data-panel-target="panel-office">办公工作台</button>
           <button type="button" class="settings-nav-item" data-panel-target="panel-permissions" id="permissions-nav-item">权限</button>
           <button type="button" class="settings-nav-item" data-panel-target="panel-about">关于</button>
         </nav>
@@ -67,6 +68,16 @@
                 </div>
               </label>
 
+              <label class="settings-row">
+                <div class="settings-row-copy">
+                  <span class="settings-row-title">语音 AI 问答</span>
+                  <span class="settings-row-description">按一下开始提问，再按一下结束；当前选中文本会自动作为问题上下文。</span>
+                </div>
+                <div class="settings-row-control settings-select-wrap">
+                  <select id="voice_ask_hotkey" data-setting="voice_ask_hotkey"></select>
+                </div>
+              </label>
+
               <div class="settings-row settings-row-stack">
                 <div class="settings-row-copy">
                   <span class="settings-row-title">快捷键方案</span>
@@ -74,8 +85,11 @@
                 </div>
                 <div class="settings-inline-actions">
                   <button type="button" id="hotkey-profile-default" class="settings-secondary-button">CTRL 方案</button>
-                  <button type="button" id="hotkey-profile-alt" class="settings-secondary-button">ALT 方案</button>
+                  <button type="button" id="hotkey-profile-alt" class="settings-secondary-button">右 ALT 语音方案</button>
+                  <button type="button" id="test-dictation-hotkey" class="settings-secondary-button">测试语音快捷键</button>
+                  <button type="button" id="test-voice-ask-hotkey" class="settings-secondary-button">测试问答快捷键</button>
                 </div>
+                <span class="settings-row-description" id="hotkey-test-status">部分笔记本将 F8 设为多媒体键，单按无效时可尝试 Fn + F8，或改用 Ctrl + /。</span>
               </div>
             </section>
 
@@ -112,10 +126,43 @@
                 <p>这些选项都直接作用于本机行为，不依赖网络服务。</p>
               </div>
 
+              <label class="settings-row settings-row-toggle">
+                <div class="settings-row-copy">
+                  <span class="settings-row-title">边说边出字（分段近实时）</span>
+                  <span class="settings-row-description">打开＝说完一句停顿后就出字，边说边看；关闭＝说完整段再一次性出字，更稳更准。</span>
+                </div>
+                <span class="settings-switch">
+                  <input type="checkbox" id="live_streaming_toggle" />
+                  <span class="settings-switch-ui"></span>
+                </span>
+              </label>
+
+              <label class="settings-row settings-row-toggle">
+                <div class="settings-row-copy">
+                  <span class="settings-row-title">直接插入带标点的修正稿</span>
+                  <span class="settings-row-description">打开＝光标处直接落带标点断句的整洁文字（每句会略晚一点）；关闭＝先落原始逐字稿。仅影响边说边出字。</span>
+                </div>
+                <span class="settings-switch">
+                  <input type="checkbox" id="insert_refined_streaming" data-setting="insert_refined_streaming" />
+                  <span class="settings-switch-ui"></span>
+                </span>
+              </label>
+
+              <label class="settings-row settings-row-toggle">
+                <div class="settings-row-copy">
+                  <span class="settings-row-title">结束后自动带入整段修正稿</span>
+                  <span class="settings-row-description">关闭（推荐）＝松开录音键后光标处文字保持不动，想替换成整段修正稿时双击 Shift 或点面板"一键带入"；打开＝松手后自动替换。</span>
+                </div>
+                <span class="settings-switch">
+                  <input type="checkbox" id="auto_apply_final_refined" data-setting="auto_apply_final_refined" />
+                  <span class="settings-switch-ui"></span>
+                </span>
+              </label>
+
               <label class="settings-row">
                 <div class="settings-row-copy">
-                  <span class="settings-row-title">识别模式</span>
-                  <span class="settings-row-description">默认是整段识别；流式输出会在录音过程中按短句持续输出文本，配合自动回填时会直接边说边出字。</span>
+                  <span class="settings-row-title">识别模式（高级）</span>
+                  <span class="settings-row-description">默认是整段识别；流式输出会在录音过程中按短句持续输出文本，配合自动回填时会直接边说边出字。一般用上面的总开关即可。</span>
                 </div>
                 <div class="settings-row-control settings-select-wrap">
                   <select id="recognition_mode" data-setting="recognition_mode">
@@ -128,13 +175,28 @@
               <label class="settings-row">
                 <div class="settings-row-copy">
                   <span class="settings-row-title">流式识别能力</span>
-                  <span class="settings-row-description">多语实时适合边说边出字；多语分段在短暂停顿后输出，混输准确率更稳；中文高精度适合纯中文长句。</span>
+                  <span class="settings-row-description">逐句出字：说完一句停顿后输出，说完整段再自动校准一次。全程本机处理、不联网。</span>
                 </div>
                 <div class="settings-row-control settings-select-wrap">
                   <select id="streaming_model" data-setting="streaming_model">
-                    <option value="multilingual_realtime">多语实时流式</option>
-                    <option value="multilingual_segmented">多语分段流式</option>
-                    <option value="zh_high_accuracy_realtime">中文高精度流式</option>
+                    <option value="multilingual_segmented">分段离线（逐句出字·离线定稿）</option>
+                  </select>
+                </div>
+              </label>
+
+              <label class="settings-row">
+                <div class="settings-row-copy">
+                  <span class="settings-row-title">识别语言</span>
+                  <span class="settings-row-description">整段识别使用的语言。选"中文普通话"可避免普通话被误判成粤语或其它语言。</span>
+                </div>
+                <div class="settings-row-control settings-select-wrap">
+                  <select id="sense_voice_language" data-setting="sense_voice_language">
+                    <option value="zh">中文普通话（推荐）</option>
+                    <option value="auto">自动多语</option>
+                    <option value="en">英语</option>
+                    <option value="ja">日语</option>
+                    <option value="ko">韩语</option>
+                    <option value="yue">粤语</option>
                   </select>
                 </div>
               </label>
@@ -223,6 +285,17 @@
                 </span>
               </label>
 
+              <label class="settings-row settings-row-toggle">
+                <div class="settings-row-copy">
+                  <span class="settings-row-title">记录办公历史（周报汇总素材）</span>
+                  <span class="settings-row-description">打开＝把每次成稿正文保存在本机，供"本周汇总"生成周报（仅存本地，最多 100 条）。涉密场景可关闭：关闭后不再保存任何正文，本周汇总同时停用；已保存的旧记录不会自动删除，请用面板的"清空本次记录"清理。</span>
+                </div>
+                <span class="settings-switch">
+                  <input type="checkbox" id="office_history_enabled" data-setting="office_history_enabled" />
+                  <span class="settings-switch-ui"></span>
+                </span>
+              </label>
+
               <label class="settings-row">
                 <div class="settings-row-copy">
                   <span class="settings-row-title">流式增强方案</span>
@@ -243,6 +316,17 @@
                 </div>
                 <span class="settings-switch">
                   <input type="checkbox" id="auto_learning_enabled" data-setting="auto_learning_enabled" />
+                  <span class="settings-switch-ui"></span>
+                </span>
+              </label>
+
+              <label class="settings-row settings-row-toggle">
+                <div class="settings-row-copy">
+                  <span class="settings-row-title">同音字自动纠正</span>
+                  <span class="settings-row-description">识别成同音错字时，自动改回“我的词”和所选行业里的正确写法，例如“预政管理课”→“狱政管理科”。</span>
+                </div>
+                <span class="settings-switch">
+                  <input type="checkbox" id="pinyin_correction_enabled" data-setting="pinyin_correction_enabled" />
                   <span class="settings-switch-ui"></span>
                 </span>
               </label>
@@ -270,82 +354,92 @@
                 <div class="dictionary-panel">
                   <div class="dictionary-guide">
                     <div>
-                      <strong>词典是做什么的？</strong>
-                      <span>常用词用于保护专有名词，纠错词用于把“听错的词”自动改成正确写法，自动学习会在本机悄悄积累客户常说的专业词。</span>
-                    </div>
-                    <div>
-                      <strong>小白怎么用？</strong>
-                      <span>先用“添加常用词”保存人名、品牌、项目名；识别总听错时再用“添加纠错词”。批量名单直接粘贴或导入表格。</span>
+                      <strong>“我的词”是什么？</strong>
+                      <span>把你常用的人名、品牌、项目名、专业术语加进来，识别更准。留空“常被错识别成”也可以——同音字（如“狱政科”被听成“预政科”）会自动纠正。</span>
                     </div>
                   </div>
 
                   <div class="dictionary-mode-grid">
                     <button type="button" id="dictionary-add-term-button" class="dictionary-mode-button">
-                      <strong>添加常用词</strong>
-                      <span>如 MiniMax、DeepSeek、客户姓名</span>
+                      <strong>＋ 添加我的词</strong>
+                      <span>如 MiniMax、狱政管理科、客户姓名</span>
                     </button>
-                    <button type="button" id="dictionary-add-replacement-button" class="dictionary-mode-button">
-                      <strong>添加纠错词</strong>
-                      <span>如 迷你麦克斯 -> MiniMax</span>
-                    </button>
-                    <button type="button" id="dictionary-show-import-button" class="dictionary-mode-button">
-                      <strong>批量导入</strong>
-                      <span>粘贴名单，或导入 txt/csv/Excel/Word</span>
-                    </button>
-                  </div>
-
-                  <div class="dictionary-toolbar">
-                    <div class="settings-input-wrap dictionary-search">
-                      <input type="search" id="dictionary-search" placeholder="搜索正确词或可能识别错的词" />
-                    </div>
-                    <button type="button" id="dictionary-import-file-button" class="settings-secondary-button">导入文件</button>
-                    <button type="button" id="dictionary-export-button" class="settings-secondary-button">导出</button>
-                    <button type="button" id="dictionary-help-button" class="settings-secondary-button">导入方法说明</button>
                   </div>
 
                   <div class="dictionary-editor" id="dictionary-editor" hidden>
                     <div class="dictionary-editor-heading">
-                      <strong id="dictionary-editor-title">添加常用词</strong>
-                      <span id="dictionary-editor-help">常用词会被保护，润写和翻译时尽量不改错。</span>
+                      <strong id="dictionary-editor-title">添加我的词</strong>
+                      <span id="dictionary-editor-help">填正确写法即可；识别老听错时，再补一下“常被错识别成”。</span>
                     </div>
                     <div class="settings-input-wrap">
-                      <input type="text" id="dictionary-term-input" placeholder="正确词，例如：typetype" />
+                      <input type="text" id="dictionary-term-input" placeholder="正确的词，例如：狱政管理科（必填）" />
                     </div>
                     <div class="settings-input-wrap">
-                      <input type="text" id="dictionary-alias-input" placeholder="可能识别错的词，可不填；多个用逗号隔开" />
+                      <input type="text" id="dictionary-alias-input" placeholder="常被错识别成，可不填；多个用逗号隔开" />
                     </div>
                     <div class="dictionary-inline-actions">
-                      <button type="button" id="dictionary-save-entry-button" class="settings-secondary-button">保存词条</button>
+                      <button type="button" id="dictionary-save-entry-button" class="settings-secondary-button">保存</button>
                       <button type="button" id="dictionary-cancel-entry-button" class="settings-secondary-button">取消</button>
                     </div>
                   </div>
 
-                  <div class="dictionary-import-panel" id="dictionary-import-panel">
-                    <div class="settings-textarea-wrap">
-                      <textarea id="dictionary-paste-input" rows="4" placeholder="可直接粘贴常用词；两列内容会识别为纠错词。"></textarea>
+                  <div class="dictionary-toolbar">
+                    <div class="settings-input-wrap dictionary-search">
+                      <input type="search" id="dictionary-search" placeholder="搜索我的词" />
                     </div>
-                    <div class="dictionary-inline-actions">
-                      <button type="button" id="dictionary-preview-paste-button" class="settings-secondary-button">预览粘贴导入</button>
-                      <button type="button" id="dictionary-confirm-import-button" class="settings-secondary-button" disabled>确认导入</button>
-                    </div>
-                    <div class="dictionary-preview" id="dictionary-preview"></div>
-                  </div>
-
-                  <div class="system-lexicon-panel">
-                    <div class="system-lexicon-header">
-                      <div class="settings-row-copy">
-                        <span class="settings-row-title">系统基础词库</span>
-                        <span class="settings-row-description" id="system-lexicon-description">系统基础词库为只读词库，仅用于术语保护和润写保留，不会上传，不会强制替换原文。</span>
-                      </div>
-                      <label class="settings-switch" title="启用系统基础词库">
-                        <input type="checkbox" id="system-lexicon-toggle" />
-                        <span class="settings-switch-ui"></span>
-                      </label>
-                    </div>
-                    <div class="system-lexicon-categories" id="system-lexicon-categories"></div>
                   </div>
 
                   <div class="dictionary-list" id="dictionary-list"></div>
+
+                  <details class="dictionary-advanced">
+                    <summary>高级设置（批量导入、系统词库、试识别）</summary>
+
+                    <div class="dictionary-toolbar">
+                      <button type="button" id="dictionary-show-import-button" class="settings-secondary-button">批量粘贴</button>
+                      <button type="button" id="dictionary-import-file-button" class="settings-secondary-button">导入文件</button>
+                      <button type="button" id="dictionary-export-button" class="settings-secondary-button">导出</button>
+                      <button type="button" id="dictionary-help-button" class="settings-secondary-button">导入方法说明</button>
+                    </div>
+
+                    <div class="dictionary-import-panel" id="dictionary-import-panel">
+                      <div class="settings-textarea-wrap">
+                        <textarea id="dictionary-paste-input" rows="4" placeholder="可直接粘贴一批词；两列内容会识别为“正确词 + 常被错识别成”。"></textarea>
+                      </div>
+                      <div class="dictionary-inline-actions">
+                        <button type="button" id="dictionary-preview-paste-button" class="settings-secondary-button">预览粘贴导入</button>
+                        <button type="button" id="dictionary-confirm-import-button" class="settings-secondary-button" disabled>确认导入</button>
+                      </div>
+                      <div class="dictionary-preview" id="dictionary-preview"></div>
+                    </div>
+
+                    <div class="system-lexicon-panel">
+                      <div class="system-lexicon-header">
+                        <div class="settings-row-copy">
+                          <span class="settings-row-title">系统基础词库</span>
+                          <span class="settings-row-description" id="system-lexicon-description">系统基础词库为只读词库，仅用于术语保护和润写保留，不会上传，不会强制替换原文。</span>
+                        </div>
+                        <label class="settings-switch" title="启用系统基础词库">
+                          <input type="checkbox" id="system-lexicon-toggle" />
+                          <span class="settings-switch-ui"></span>
+                        </label>
+                      </div>
+                      <div class="system-lexicon-categories" id="system-lexicon-categories"></div>
+                    </div>
+
+                    <div class="dictionary-editor">
+                      <div class="dictionary-editor-heading">
+                        <strong>词库体检与试识别</strong>
+                        <span>输入一段可能识别错的文字，查看个人、系统、行业和混输词库是否命中。</span>
+                      </div>
+                      <div class="settings-input-wrap">
+                        <input type="text" id="dictionary-probe-input" placeholder="例如：今天开瑞威看一下爱披爱" />
+                      </div>
+                      <div class="dictionary-inline-actions">
+                        <button type="button" id="dictionary-probe-button" class="settings-secondary-button">试识别</button>
+                      </div>
+                      <div class="dictionary-preview" id="dictionary-probe-result"></div>
+                    </div>
+                  </details>
                 </div>
               </div>
 
@@ -375,8 +469,8 @@
 
             <section class="settings-group">
               <div class="settings-group-heading">
-                <h3>LLM 润写</h3>
-                <p>调用 LLM API 优化语音转写结果，自动补全标点、梳理逻辑并整理层级结构。</p>
+                <h3>国产 AI 润写</h3>
+                <p>连接用户自有的国产 AI 服务，完成原文修正、结构化整理和语音问答。</p>
               </div>
 
               <label class="settings-row">
@@ -421,6 +515,15 @@
                       <option value="business_memo">备忘录</option>
                       <option value="business_application">申请/审批说明</option>
                       <option value="business_meeting_minutes">企业会议纪要</option>
+                      <option value="business_daily_report">日报</option>
+                      <option value="business_weekly_report">周报</option>
+                      <option value="business_monthly_report">月报</option>
+                      <option value="business_rectification_report">整改报告</option>
+                      <option value="business_situation_statement">情况说明</option>
+                      <option value="business_approval_note">审批说明</option>
+                      <option value="business_talk_record">谈话记录</option>
+                      <option value="business_training_record">培训记录</option>
+                      <option value="business_sop">SOP</option>
                     </optgroup>
                     <optgroup label="学生/校园常用">
                       <option value="student_leave_note">请假条</option>
@@ -433,13 +536,59 @@
                 </div>
               </label>
 
+              <label class="settings-row">
+                <div class="settings-row-copy">
+                  <span class="settings-row-title">行业模板包</span>
+                  <span class="settings-row-description">行业包会联动专业词、文体结构、表达规则和风险提醒。</span>
+                </div>
+                <div class="settings-row-control settings-select-wrap">
+                  <select id="active_industry_pack" data-setting="active_industry_pack"></select>
+                </div>
+              </label>
+
+              <div class="settings-row">
+                <div class="settings-row-copy">
+                  <span class="settings-row-title">本行业专业词表</span>
+                  <span class="settings-row-description" id="industry-terms-description">导入本单位的专业词表（txt / csv / xlsx / xls / docx，一行一个词），识别与整理时会优先保护这些词不被改错。</span>
+                </div>
+                <div class="settings-row-control">
+                  <button type="button" id="import-industry-terms" class="settings-secondary-button">导入词表</button>
+                  <button type="button" id="clear-industry-terms" class="settings-secondary-button">清空</button>
+                </div>
+              </div>
+
+              <label class="settings-row">
+                <div class="settings-row-copy">
+                  <span class="settings-row-title">AI 整理面板大小</span>
+                  <span class="settings-row-description">迷你适合平板和小屏；标准显示原文与整理稿；工作台显示完整控制项。</span>
+                </div>
+                <div class="settings-row-control settings-select-wrap">
+                  <select id="office_panel_mode" data-setting="office_panel_mode">
+                    <option value="mini">迷你悬浮窗</option>
+                    <option value="standard">标准面板</option>
+                    <option value="workbench">展开工作台</option>
+                  </select>
+                </div>
+              </label>
+
               <label class="settings-row settings-row-toggle">
                 <div class="settings-row-copy">
-                  <span class="settings-row-title">启用 LLM 润写</span>
+                  <span class="settings-row-title">启用国产 AI 润写</span>
                   <span class="settings-row-description">开启后会清理口语转写、修正明显口误，尽量保留关键信息并整理为段落、清单或层级文档。</span>
                 </div>
                 <span class="settings-switch">
                   <input type="checkbox" id="llm_enabled" data-setting="llm_enabled" />
+                  <span class="settings-switch-ui"></span>
+                </span>
+              </label>
+
+              <label class="settings-row settings-row-toggle">
+                <div class="settings-row-copy">
+                  <span class="settings-row-title">语音问答联网搜索</span>
+                  <span class="settings-row-description">问天气、新闻等实时问题时自动联网查证（仅通义千问/智谱等支持，用同一个 API Key，无需额外搜索 Key）。润写不受影响、始终不联网。</span>
+                </div>
+                <span class="settings-switch">
+                  <input type="checkbox" id="voice_ask_web_search" data-setting="voice_ask_web_search" />
                   <span class="settings-switch-ui"></span>
                 </span>
               </label>
@@ -452,22 +601,29 @@
                   </div>
                   <div class="settings-row-control settings-select-wrap">
                     <select id="llm_provider" data-setting="llm_provider">
-                      <option value="openai">OpenAI GPT（快速推荐）</option>
-                      <option value="minimax_cn">MiniMax 国内版</option>
-                      <option value="minimax_intl">MiniMax 国际版</option>
+                      <option value="minimax_cn">MiniMax 国内版 · 支持问答联网</option>
                       <option value="deepseek">DeepSeek</option>
-                      <option value="qwen_cn">通义千问 / 阿里云百炼（北京）</option>
-                      <option value="qwen_sg">通义千问 / 阿里云百炼（新加坡）</option>
-                      <option value="qwen_us">通义千问 / 阿里云百炼（美国）</option>
-                      <option value="zhipu">智谱 GLM</option>
-                      <option value="kimi_cn">Kimi / 月之暗面国内版</option>
-                      <option value="kimi_intl">Kimi 国际版</option>
+                      <option value="qwen_cn">通义千问 / 阿里云百炼（北京）· 支持问答联网</option>
+                      <option value="zhipu">智谱 GLM · 支持问答联网</option>
+                      <option value="kimi_cn">Kimi / 月之暗面国内版 · 支持问答联网</option>
                       <option value="siliconflow">硅基流动</option>
-                      <option value="baidu_cn">百度千帆国内版</option>
-                      <option value="baidu_intl">百度千帆国际版</option>
-                      <option value="gemini">Google Gemini</option>
+                      <option value="baidu_cn">百度千帆国内版 · 支持问答联网</option>
                       <option value="baichuan">百川智能</option>
-                      <option value="doubao">豆包 / 火山方舟</option>
+                      <option value="doubao">豆包 / 火山方舟 · 支持问答联网</option>
+                    </select>
+                  </div>
+                </label>
+
+                <label class="settings-row">
+                  <div class="settings-row-copy">
+                    <span class="settings-row-title">模型档位</span>
+                    <span class="settings-row-description">只影响办公整理和语音问答；语音润写始终使用最快的轻量模型。不确定就选标准。</span>
+                  </div>
+                  <div class="settings-row-control settings-select-wrap">
+                    <select id="llm_tier" data-setting="llm_tier">
+                      <option value="economy">经济（最快最省，日常够用）</option>
+                      <option value="standard">标准（推荐，办公写作更稳）</option>
+                      <option value="premium">高精（最强，长文/复杂任务，较慢较贵）</option>
                     </select>
                   </div>
                 </label>
@@ -492,10 +648,32 @@
                   </div>
                 </label>
 
+                <div class="settings-row settings-row-stack">
+                  <div class="settings-row-copy">
+                    <span class="settings-row-title">没有 API Key？</span>
+                    <span class="settings-row-description" id="llm-api-key-path">切换厂家后这里会显示申请步骤。</span>
+                  </div>
+                  <div class="settings-row-control">
+                    <button type="button" id="llm-open-api-key-page" class="settings-secondary-button">去申请 API Key</button>
+                  </div>
+                </div>
+
+                <label class="settings-row settings-row-stack">
+                  <div class="settings-row-copy">
+                    <span class="settings-row-title">办公/问答模型（可选）</span>
+                    <span class="settings-row-description">仅影响办公整理和语音问答；语音润写始终使用该厂家最快的轻量模型。</span>
+                  </div>
+                  <div class="settings-row-control settings-select-wrap">
+                    <select id="llm_model_select" data-setting="llm_model_select">
+                      <option value="">跟随档位（推荐）</option>
+                    </select>
+                  </div>
+                </label>
+
                 <label class="settings-row settings-row-stack" hidden>
                   <div class="settings-row-copy">
-                    <span class="settings-row-title">服务参数</span>
-                    <span class="settings-row-description" id="llm-model-description">根据服务厂家自动填写。</span>
+                    <span class="settings-row-title">服务参数（高级）</span>
+                    <span class="settings-row-description" id="llm-model-description">高级用户手填自定义型号；留空则跟随上面的下拉/档位。</span>
                   </div>
                   <div class="settings-row-control settings-input-wrap">
                     <input type="text" id="llm_model" data-setting="llm_model" />
@@ -504,7 +682,7 @@
 
                 <div class="settings-provider-guide">
                   <div><strong>填写方式：</strong>先选平台，再粘贴该平台的 API Key。</div>
-                  <div>国内版和国际版不要混用；连接失败通常与 Key、平台、额度、网络或代理有关。</div>
+                  <div>连接失败通常与 Key、平台、额度、网络或代理有关。</div>
                 </div>
 
                 <div class="settings-row">
@@ -518,6 +696,49 @@
                     <span id="llm-active-route-label" class="settings-row-description">未启用。</span>
                   </div>
                 </div>
+              </div>
+            </section>
+          </section>
+
+          <section class="settings-panel" id="panel-office">
+            <section class="settings-group">
+              <div class="settings-group-heading">
+                <h3>语音办公工作台</h3>
+                <p>从语音或选中文本直接生成可交付办公成果。</p>
+              </div>
+              <div class="dictionary-mode-grid">
+                <button type="button" class="dictionary-mode-button" id="office-start-voice-ask">
+                  <strong>语音 AI 问答</strong><span>提问、解释、总结、生成方案</span>
+                </button>
+                <button type="button" class="dictionary-mode-button" id="office-show-streaming-panel">
+                  <strong>打开 AI 整理面板</strong><span>会议记录、原文修正、结构化整理</span>
+                </button>
+                <button type="button" class="dictionary-mode-button" id="office-organize-clipboard">
+                  <strong>整理剪贴板</strong><span>把已复制内容整理成当前模板</span>
+                </button>
+                <button type="button" class="dictionary-mode-button" id="office-organize-selection">
+                  <strong>整理选中文本</strong><span>读取当前应用中的选中内容</span>
+                </button>
+                <button type="button" class="dictionary-mode-button" id="office-import-file">
+                  <strong>导入文件整理</strong><span>支持 Word、TXT、Excel、CSV</span>
+                </button>
+                <button type="button" class="dictionary-mode-button" data-panel-jump="panel-general">
+                  <strong>模板与行业包</strong><span>管理文体、专业词和风险规则</span>
+                </button>
+              </div>
+              <div class="settings-row settings-row-stack">
+                <div class="settings-row-copy">
+                  <span class="settings-row-title">动作成果</span>
+                  <span class="settings-row-description">一次语音可形成原文、修正稿、结构化参考、待办、风险点和下一步回复；缺少关键事实时标记“待补充”。</span>
+                </div>
+              </div>
+              <div class="settings-row settings-row-stack">
+                <div class="settings-row-copy">
+                  <span class="settings-row-title">最近任务</span>
+                  <span class="settings-row-description">历史记录仅保存在本机。</span>
+                </div>
+                <div class="dictionary-inline-actions"><button type="button" class="settings-secondary-button" id="office-clear-history">清空历史</button></div>
+                <div class="dictionary-list" id="office-history-list"></div>
               </div>
             </section>
           </section>

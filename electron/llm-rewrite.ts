@@ -1,4 +1,5 @@
 import { LlmRewriteConfig, LlmRewriteOptions, LlmRewriteResponse, RewriteScenario } from './types';
+import { buildOfficeTemplatePrompt, getOfficeTemplate } from './office-template-registry';
 
 const DEFAULT_SYSTEM_PROMPT = `You are a professional voice-to-text structuring assistant. Transform raw speech transcription into clear, polished, complete, and structured text.
 
@@ -17,7 +18,7 @@ Core rules:
 
 The user text will be enclosed in <transcription> tags.`;
 
-const SCENARIO_PROMPTS: Record<RewriteScenario, string> = {
+const SCENARIO_PROMPTS: Partial<Record<RewriteScenario, string>> = {
   general: 'Use the most natural structure for the content. For short messages, keep it concise.',
   meeting_notes: 'Format as meeting notes when possible: topic, key points, decisions, action items, owners, deadlines, and risks.',
   work_report: 'Format as a work report when possible: background, progress, problems, next steps, and support needed.',
@@ -55,50 +56,30 @@ const SCENARIO_PROMPTS: Record<RewriteScenario, string> = {
   student_review: 'Draft as a study summary/review. Structure around learning content, key gains, problems, improvement plan, and future goals.',
 };
 
-const SCENARIO_LABELS: Record<RewriteScenario, string> = {
-  general: '通用整理',
-  meeting_notes: '会议纪要',
-  work_report: '工作汇报',
-  message_reply: '邮件/微信回复',
-  todo_list: '待办清单',
-  study_notes: '学习笔记',
-  customer_service: '客服记录',
-  official_resolution: '决议',
-  official_decision: '决定',
-  official_order: '命令（令）',
-  official_communique: '公报',
-  official_announcement: '公告',
-  official_public_notice: '通告',
-  official_opinion: '意见',
-  official_notice: '通知',
-  official_circular: '通报',
-  official_report: '报告',
-  official_request: '请示',
-  official_reply: '批复',
-  official_proposal: '议案',
-  official_letter: '函',
-  official_minutes: '纪要',
-  business_notice: '公司通知',
-  business_plan: '工作计划',
-  business_summary: '工作总结',
-  business_proposal: '工作方案',
-  business_email: '商务邮件/微信',
-  business_memo: '备忘录',
-  business_application: '申请/审批说明',
-  business_meeting_minutes: '企业会议纪要',
-  student_leave_note: '请假条',
-  student_report: '实习/实践报告',
-  student_activity_plan: '活动策划',
-  student_speech: '演讲稿',
-  student_review: '学习总结',
-};
-
 export function getRewriteScenarioPrompt(scenario: RewriteScenario | undefined): string {
-  return SCENARIO_PROMPTS[scenario ?? 'general'] ?? SCENARIO_PROMPTS.general;
+  const selected = scenario ?? 'general';
+  return SCENARIO_PROMPTS[selected] ?? buildOfficeTemplatePrompt(selected, 'general_office');
 }
 
 export function getRewriteScenarioLabel(scenario: RewriteScenario | undefined): string {
-  return SCENARIO_LABELS[scenario ?? 'general'] ?? SCENARIO_LABELS.general;
+  return getOfficeTemplate(scenario).name;
+}
+
+// 各厂家"深度思考"开关的参数风格。未知厂家返回空对象，避免发出对方不认识的参数。
+export function buildThinkingParams(
+  style: string | undefined,
+  enabled: boolean
+): Record<string, unknown> {
+  switch (style) {
+    case 'qwen':
+      return { enable_thinking: enabled };
+    case 'glm':
+    case 'doubao':
+      return { thinking: { type: enabled ? 'enabled' : 'disabled' } };
+    // deepseek 用模型名区分思考与否（v4-flash / v4-pro），无需额外参数。
+    default:
+      return {};
+  }
 }
 
 export class LlmRewriteEngine {
@@ -154,6 +135,8 @@ export class LlmRewriteEngine {
       messages,
       temperature: this.config.temperature ?? 0.3,
       max_tokens: this.config.max_tokens ?? 4096,
+      // 润写要快：新一代混合推理模型默认可能带深度思考，会明显变慢变啰嗦，这里显式关闭。
+      ...buildThinkingParams(this.config.thinking_style, this.config.enable_thinking ?? false),
     };
 
     // Anthropic uses messages format, OpenAI compatible uses messages
@@ -221,6 +204,7 @@ When these terms appear in the transcription, preserve them exactly unless the s
 
   private buildScenarioPrompt(): string {
     const scenario = this.options.scenario ?? 'general';
+    const industryPack = this.options.industryPack ?? 'general_office';
     const voiceFormatting = this.options.voiceFormattingEnabled === false
       ? ''
       : '\nVoice formatting commands such as spaces, line breaks, blank lines, titles, and numbered points may already have been converted locally. Preserve intentional line breaks and hierarchy unless they are clearly wrong.';
@@ -228,7 +212,10 @@ When these terms appear in the transcription, preserve them exactly unless the s
     return `
 
 Scenario mode:
-${getRewriteScenarioPrompt(scenario)}${voiceFormatting}`;
+${getRewriteScenarioPrompt(scenario)}
+
+Office template and industry rules:
+${buildOfficeTemplatePrompt(scenario, industryPack)}${voiceFormatting}`;
   }
 
   private buildUserMessage(rawText: string): string {
@@ -245,17 +232,27 @@ ${getRewriteScenarioPrompt(scenario)}${voiceFormatting}`;
 
 export async function testLlmConnection(config: LlmRewriteConfig): Promise<{ ok: boolean; latency_ms: number; error?: string }> {
   const start = Date.now();
-  try {
-    const engine = new LlmRewriteEngine({
-      ...config,
-      max_tokens: Math.min(config.max_tokens ?? 4096, 96),
-    });
-    // Send a minimal test request
-    await engine.rewrite('测试连接');
-    return { ok: true, latency_ms: Date.now() - start };
-  } catch (e) {
-    return { ok: false, latency_ms: Date.now() - start, error: formatLlmRuntimeError(e) };
+  const engine = new LlmRewriteEngine({
+    ...config,
+    max_tokens: Math.min(config.max_tokens ?? 4096, 96),
+  });
+  // 智谱等免费模型限速较严，测试撞到 429 时做 1-2 次指数退避重试（1s、3s）后再报错。
+  const delays = [1000, 3000];
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+    try {
+      await engine.rewrite('测试连接');
+      return { ok: true, latency_ms: Date.now() - start };
+    } catch (e) {
+      lastError = e;
+      const message = e instanceof Error ? e.message : String(e);
+      if (!/\b429\b|rate limit|1302|throttl/i.test(message) || attempt === delays.length) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+    }
   }
+  return { ok: false, latency_ms: Date.now() - start, error: formatLlmRuntimeError(lastError) };
 }
 
 function formatLlmApiError(status: number, detail: string): string {
@@ -275,7 +272,13 @@ function formatLlmApiError(status: number, detail: string): string {
   }
 
   if (status === 429) {
-    return `LLM API error (${status}): 请求过快或额度不足。请稍后重试，或检查平台余额、并发和限速。${cleanDetail}`;
+    // 智谱 code 1302、通义 Throttling.RateQuota 等都是"速率/并发限制"，与账户余额无关；
+    // 只有明确提到 quota/insufficient/balance/欠费/额度不足时才提余额。
+    const isBalance = /insufficient|quota exceeded|balance|arrears|欠费|余额不足|额度不足/i.test(cleanDetail);
+    if (isBalance) {
+      return `LLM API error (${status}): 账户额度不足或欠费，请到该平台控制台充值或检查套餐。${cleanDetail}`;
+    }
+    return `LLM API error (${status}): 请求过快或达到限速（与账户余额无关，稍等几十秒会自动恢复）。如仍报错，可到平台控制台查看该模型的速率上限，或改用付费/更高档的型号。${cleanDetail}`;
   }
 
   if (status === 400) {

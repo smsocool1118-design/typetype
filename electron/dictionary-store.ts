@@ -38,6 +38,8 @@ export class DictionaryStore {
   private systemLexicon: SystemLexiconEntry[] = [];
   private systemLexiconEnabled = true;
   private disabledSystemCategories = new Set<string>();
+  // 类目 → 词表的惰性索引，首次按类目取词时才建（50 万条全量分桶只做一次）。
+  private systemTermsByCategory: Map<string, string[]> | null = null;
 
   constructor(options: DictionaryStoreOptions) {
     this.dataDir = options.dataDir;
@@ -243,6 +245,63 @@ export class DictionaryStore {
 
   getMatchedTerms(text: string, limit = 50): string[] {
     return findMatchedDictionaryTerms(text, this.entries, this.getEnabledSystemLexicon(), limit);
+  }
+
+  /**
+   * 从系统大词库的指定类目里，挑出当前文本真正命中的词（行业包扩词用）。
+   *
+   * 只回命中的词，绝不整包返回——医学类目有 18465 条，全量注入既会撑爆 prompt，
+   * 也会让本地改写的术语保护列表失去意义。
+   * 类目走首字预筛 + 惰性索引，避免每次都全量扫 50 万条。
+   */
+  getMatchedSystemTermsByCategories(text: string, categories: string[], limit = 40): string[] {
+    const source = (text || '').trim();
+    if (!source || categories.length === 0 || !this.systemLexiconEnabled) {
+      return [];
+    }
+
+    const textCharacters = new Set(Array.from(source));
+    const matched: string[] = [];
+    const seen = new Set<string>();
+    for (const category of categories) {
+      if (this.disabledSystemCategories.has(category)) {
+        continue;
+      }
+      for (const term of this.getSystemTermsForCategory(category)) {
+        const firstCharacter = term[0];
+        if (!firstCharacter || !textCharacters.has(firstCharacter)) {
+          continue;
+        }
+        if (term.length < 2 || seen.has(term) || !source.includes(term)) {
+          continue;
+        }
+        seen.add(term);
+        matched.push(term);
+        if (matched.length >= limit * 4) {
+          break;
+        }
+      }
+    }
+
+    return matched
+      .sort((a, b) => b.length - a.length || a.localeCompare(b, 'zh-CN'))
+      .slice(0, Math.max(0, limit));
+  }
+
+  private getSystemTermsForCategory(category: string): string[] {
+    if (!this.systemTermsByCategory) {
+      const index = new Map<string, string[]>();
+      for (const entry of this.systemLexicon) {
+        const bucket = index.get(entry.category);
+        if (bucket) {
+          bucket.push(entry.term);
+        } else {
+          index.set(entry.category, [entry.term]);
+        }
+      }
+      this.systemTermsByCategory = index;
+    }
+    return this.systemTermsByCategory.get(category) ?? [];
   }
 
   private loadPersistedDictionary(): void {

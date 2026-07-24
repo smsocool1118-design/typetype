@@ -654,8 +654,40 @@ body {
 
 .dictionary-mode-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 8px;
+}
+
+.dictionary-advanced {
+  margin-top: 14px;
+  border: 1px solid rgba(24, 33, 43, 0.1);
+  border-radius: 8px;
+  background: rgba(24, 33, 43, 0.02);
+}
+
+.dictionary-advanced > summary {
+  cursor: pointer;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  list-style: none;
+}
+
+.dictionary-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+
+.dictionary-advanced > summary::before {
+  content: "▸ ";
+}
+
+.dictionary-advanced[open] > summary::before {
+  content: "▾ ";
+}
+
+.dictionary-advanced > *:not(summary) {
+  margin: 8px 12px 12px;
 }
 
 .dictionary-mode-button {

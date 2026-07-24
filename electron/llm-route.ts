@@ -17,6 +17,7 @@ export interface LlmRewriteRouteDeps {
   logger?: Pick<Console, 'log' | 'error'>;
   preserveTerms?: string[];
   scenario?: Settings['rewrite_scenario'];
+  industryPack?: Settings['active_industry_pack'];
   voiceFormattingEnabled?: boolean;
 }
 
@@ -43,10 +44,15 @@ export async function rewriteWithPreferredLlm(
       if (deps.scenario) {
         rewriteOptions.scenario = deps.scenario;
       }
+      if (deps.industryPack) {
+        rewriteOptions.industryPack = deps.industryPack;
+      }
       if (typeof deps.voiceFormattingEnabled === 'boolean') {
         rewriteOptions.voiceFormattingEnabled = deps.voiceFormattingEnabled;
       }
-      const result = await createEngine(apiConfig, rewriteOptions).rewrite(text);
+      // 语音润写恒用轻量模型且关闭深度思考（档位只影响办公/问答）。
+      const rewriteConfig: LlmRewriteConfig = { ...apiConfig, enable_thinking: false };
+      const result = await createEngine(rewriteConfig, rewriteOptions).rewrite(text);
       logger.log('[llm-rewrite] success via API key config', {
         provider: apiConfig.provider,
         model: apiConfig.model,

@@ -90,28 +90,12 @@ function Write-IcoFromPngs {
   }
 }
 
-function Fill-Generated-Corners {
-  param([System.Drawing.Bitmap]$Bitmap)
-
-  $background = [System.Drawing.Color]::FromArgb(255, 76, 90, 80)
-  for ($y = 0; $y -lt $Bitmap.Height; $y++) {
-    for ($x = 0; $x -lt $Bitmap.Width; $x++) {
-      $pixel = $Bitmap.GetPixel($x, $y)
-      if (($pixel.R -lt 20 -and $pixel.G -lt 20 -and $pixel.B -lt 20) -or $pixel.A -lt 8) {
-        $Bitmap.SetPixel($x, $y, $background)
-      }
-    }
-  }
-}
-
 if (-not (Test-Path -LiteralPath $SourcePng)) {
   throw "Missing source PNG: $SourcePng"
 }
 
 $source = [System.Drawing.Bitmap]::FromFile($SourcePng)
 try {
-  Fill-Generated-Corners $source
-
   New-Item -ItemType Directory -Force -Path $ResourcesDir | Out-Null
 
   $iconPng = Join-Path $ResourcesDir "icon.png"

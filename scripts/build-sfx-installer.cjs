@@ -6,15 +6,24 @@ const pkg = require("../package.json");
 
 const rootDir = path.resolve(__dirname, "..");
 const releaseDir = path.join(rootDir, "release");
-const appDir = path.join(releaseDir, "win-unpacked");
+
+// 架构参数：默认 x64（保持原有行为），传 arm64 则打 ARM64 包。
+// 用法：node scripts/build-sfx-installer.cjs [x64|arm64]  或  ARCH=arm64 node scripts/build-sfx-installer.cjs
+const targetArch = (process.argv[2] || process.env.ARCH || "x64").toLowerCase();
+if (!["x64", "arm64"].includes(targetArch)) {
+  throw new Error(`Unsupported arch: ${targetArch}. Use x64 or arm64.`);
+}
+// electron-builder 的输出目录：x64 是 win-unpacked，arm64 是 win-arm64-unpacked。
+const appDir = path.join(releaseDir, targetArch === "x64" ? "win-unpacked" : "win-arm64-unpacked");
 const productName = pkg.build?.productName || pkg.name || "typetype";
 const safeProductName = productName.replace(/[\\/:*?"<>|]/g, "-");
-const installDirName = `${safeProductName}-${pkg.version}-runtimefix`;
 const executableName = `${safeProductName}.exe`;
-const archivePath = path.join(releaseDir, `${safeProductName}-customer.7z`);
-const sfxConfigPath = path.join(releaseDir, `${safeProductName}-sfx-config.txt`);
-const patchedSfxPath = path.join(releaseDir, `${safeProductName}-7z.sfx`);
-const installerPath = path.join(releaseDir, `${safeProductName}-customer-installer.exe`);
+// 产物名带架构后缀，避免两个架构互相覆盖。
+const archiveSuffix = `${safeProductName}-${targetArch}`;
+const archivePath = path.join(releaseDir, `${archiveSuffix}-customer.7z`);
+const sfxConfigPath = path.join(releaseDir, `${archiveSuffix}-sfx-config.txt`);
+const patchedSfxPath = path.join(releaseDir, `${archiveSuffix}-7z.sfx`);
+const installerPath = path.join(releaseDir, `${archiveSuffix}-customer-installer.exe`);
 
 const sevenZipPath = "C:\\Program Files\\7-Zip\\7z.exe";
 const sfxPath = "C:\\Program Files\\7-Zip\\7z.sfx";
@@ -28,7 +37,8 @@ try {
 }
 
 function main() {
-  assertExists(appDir, "win-unpacked application directory");
+  console.log(`Building SFX installer for arch: ${targetArch} (from ${path.basename(appDir)})`);
+  assertExists(appDir, `${path.basename(appDir)} application directory`);
   assertExists(path.join(appDir, executableName), `${productName} executable`);
   assertExists(sevenZipPath, "7-Zip executable");
   assertExists(sfxPath, "7-Zip SFX module");
@@ -48,7 +58,7 @@ function main() {
       ";!@Install@!UTF-8!",
       `Title="${productName} 安装"`,
       `BeginPrompt="即将安装 ${productName} 到当前用户目录，并创建桌面快捷方式。"`,
-      `InstallPath="%LocalAppData%\\\\Programs\\\\${installDirName}"`,
+      `InstallPath="%LocalAppData%\\Programs\\${safeProductName}"`,
       'OverwriteMode="2"',
       'RunProgram="powershell.exe -NoProfile -ExecutionPolicy Bypass -File install.ps1"',
       ";!@InstallEnd@!",
@@ -68,12 +78,20 @@ function writeInstallHelpers() {
   fs.writeFileSync(
     path.join(appDir, "install.ps1"),
     String.raw`$ErrorActionPreference = 'SilentlyContinue'
-$installDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$stagingDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$installRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs'
+$installDir = Join-Path $installRoot '${safeProductName}'
 $exePath = Join-Path $installDir '${executableName}'
 $desktopDir = [Environment]::GetFolderPath('DesktopDirectory')
 $programsDir = [Environment]::GetFolderPath('Programs')
 $startMenuDir = Join-Path $programsDir '${safeProductName}'
 Stop-Process -Name '${safeProductName}' -Force
+
+if ($stagingDir -ne $installDir) {
+  New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+  robocopy $stagingDir $installDir /MIR /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
+}
+
 New-Item -ItemType Directory -Force -Path $startMenuDir | Out-Null
 
 $shell = New-Object -ComObject WScript.Shell
@@ -98,6 +116,11 @@ $uninstallShortcut.IconLocation = "$exePath,0"
 $uninstallShortcut.Save()
 
 Start-Process -FilePath $exePath -WorkingDirectory $installDir
+
+if ($stagingDir -ne $installDir) {
+  $cmd = '/c timeout /t 2 >nul & rmdir /s /q "' + $stagingDir + '"'
+  Start-Process -FilePath 'cmd.exe' -ArgumentList $cmd -WindowStyle Hidden
+}
 `,
     "utf8",
   );

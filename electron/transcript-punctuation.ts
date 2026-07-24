@@ -21,6 +21,17 @@ const BOUNDARY_WORDS = [
   '以及',
 ];
 
+// 非流式语义标点的时间预算：短句快、长句给足（CPU 上长句 >260ms 会超时回退到规则标点）。
+export const NON_STREAMING_PUNCTUATION_MIN_TIMEOUT_MS = 260;
+export const NON_STREAMING_PUNCTUATION_MAX_TIMEOUT_MS = 1200;
+export function nonStreamingPunctuationBudgetMs(textLength: number): number {
+  const extra = Math.max(0, textLength - 12) * 12;
+  return Math.min(
+    NON_STREAMING_PUNCTUATION_MAX_TIMEOUT_MS,
+    NON_STREAMING_PUNCTUATION_MIN_TIMEOUT_MS + extra
+  );
+}
+
 export function applyBasicTranscriptPunctuation(text: string): string {
   let result = normalizePunctuationSpacing(text);
   if (!result) {

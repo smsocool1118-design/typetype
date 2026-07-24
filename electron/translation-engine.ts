@@ -293,23 +293,33 @@ export class TranslationEngine {
   }
 }
 
-function buildHyMt2Prompt(text: string, targetLanguage: string, preserveTerms: string[]): string {
-  const uniqueTerms = Array.from(new Set(preserveTerms.map((term) => term.trim()).filter(Boolean))).slice(0, 30);
-  const terminology = uniqueTerms.length
-    ? uniqueTerms.map((term) => `- ${term}`).join('\n')
-    : '无';
+// HY-MT2（腾讯混元翻译 1.8B）是专用翻译模型，不是通用指令模型。
+// 旧版用一段英文元指令 + <terms> 术语块提示它，结果这个小模型不照做，反而把指令和术语列表
+// 原样"续写"出来——用户在微信里就看到整段提示词（Use <terms>… 英语翻译- 言语治疗-…）被打进输入框，
+// 真正的译文被埋在最后。改用官方推荐的极简中文提示格式，模型只输出译文本身。
+// preserveTerms 暂不再塞进提示词（模型用不了还会引发回显）；术语一致性如需保证由后处理兜底。
+export function buildHyMt2Prompt(text: string, targetLanguage: string, _preserveTerms: string[] = []): string {
+  return `把下面的文本翻译成${targetLanguage}，不要额外解释。\n\n${text.trim()}`;
+}
 
-  return [
-    `You are a translation engine. Translate ONLY the text inside <source> into ${targetLanguage}.`,
-    'Use <terms> only as terminology hints. Do not translate or output instructions, tags, or terms list.',
-    'Output translation only.',
-    '<terms>',
-    terminology,
-    '</terms>',
-    '<source>',
-    text,
-    '</source>',
-  ].join('\n');
+// 兜底：即便模型仍回显了提示词/标签，也把这些行从译文里剔除，绝不让它们进入输入框。
+const HYMT2_PROMPT_ARTIFACT_TAGS = new Set(['<terms>', '</terms>', '<source>', '</source>']);
+
+function isHyMt2PromptArtifactLine(line: string): boolean {
+  if (HYMT2_PROMPT_ARTIFACT_TAGS.has(line)) {
+    return true;
+  }
+  // 新版极简提示若被回显
+  if (/^把下面的文本翻译成.*不要额外解释/u.test(line)) {
+    return true;
+  }
+  // 旧版英文元指令若被回显（老提示词续写残留）
+  return (
+    /^You are a translation engine/i.test(line) ||
+    /^Use <terms>/i.test(line) ||
+    /^Output translation only/i.test(line) ||
+    /^Do not translate or output/i.test(line)
+  );
 }
 
 function writeHyMt2PromptFile(prompt: string, dataDir: string): string {
@@ -320,8 +330,8 @@ function writeHyMt2PromptFile(prompt: string, dataDir: string): string {
   return promptFilePath;
 }
 
-function cleanupHyMt2Output(output: string): string {
-  const lines = output
+export function cleanupHyMt2Output(output: string): string {
+  let lines = output
     .replace(/<｜[^｜]+｜>/g, '')
     .replace(/<\|[^|]+\|>/g, '')
     .replace(/\r/g, '')
@@ -329,19 +339,36 @@ function cleanupHyMt2Output(output: string): string {
     .map((line) => line.trim())
     .filter(Boolean);
 
-  const promptIndex = lines.findIndex((line) => line.startsWith('> '));
-  const sourceEndIndex = lines.findIndex((line, index) => index > promptIndex && line === '</source>');
-  const startIndex = sourceEndIndex >= 0
-    ? sourceEndIndex + 1
-    : (promptIndex >= 0 ? promptIndex + 1 : 0);
-  const candidateLines = lines.slice(startIndex);
-  const cleanedLines = candidateLines
+  // 旧版 llama-cli 会用 "> " 回显提示词并带 <source>…</source>；新版用 --no-display-prompt 不回显。
+  // 若出现回显的 </source>，真正译文在最后一个 </source> 之后。
+  const sourceEndIndex = lines.lastIndexOf('</source>');
+  if (sourceEndIndex >= 0) {
+    lines = lines.slice(sourceEndIndex + 1);
+  }
+
+  // 若模型回显了 <terms>…</terms> 术语块，整段剔除（含中间的 "- 词" 列表，
+  // 正是这些术语行当初被打进了微信输入框）。
+  lines = dropTaggedBlock(lines, '<terms>', '</terms>');
+
+  const cleanedLines = lines
     .filter((line) => !isLlamaCliNoiseLine(line))
+    .filter((line) => !isHyMt2PromptArtifactLine(line))
+    .filter((line) => !line.startsWith('> '))
     .filter((line) => !/^[▄▀█\s]+$/.test(line));
 
   return cleanedLines
     .join('\n')
     .trim();
+}
+
+// 删除成对标签之间（含标签本身）的所有行；标签不成对时原样返回。
+function dropTaggedBlock(lines: string[], openTag: string, closeTag: string): string[] {
+  const start = lines.indexOf(openTag);
+  const end = lines.indexOf(closeTag);
+  if (start >= 0 && end > start) {
+    return [...lines.slice(0, start), ...lines.slice(end + 1)];
+  }
+  return lines;
 }
 
 function isLlamaCliNoiseLine(line: string): boolean {

@@ -11,18 +11,29 @@ import {
   DictionaryViewData,
   StreamingAiPanelState,
   RewriteScenario,
+  DictionaryProbeResult,
+  IndustryPackId,
+  OfficePanelMode,
+  OfficeTemplateCatalog,
+  OfficeHistoryItem,
+  OfficeWorkspaceResult,
+  ShortcutTestResult,
+  VoiceAskState,
+  IndustryTermStats,
+  IndustryTermImportResult,
 } from './types';
 
 export function registerIpcHandlers(
   getSnapshot: () => UiSnapshot,
   getSettingsViewData: () => SettingsViewData,
   saveSettings: (settings: Settings) => Promise<UiSnapshot> | UiSnapshot,
-  openSettings: () => void,
+  openSettings: (focus?: string) => void,
   openAccessibilitySettings: () => void,
   openMicrophoneSettings: () => void,
   openInputMonitoringSettings: () => void,
   openLogDirectory: () => void,
   openFeedbackEmail: () => void,
+  openApiKeyPage: (providerKey: string) => void,
   runAsrDiagnostics: () => Promise<AsrDiagnostics>,
   installRuntimeDependency: () => Promise<{ ok: boolean; message: string; exit_code?: number; log_path?: string }>,
   repairShortcutsAndRecorder: () => Promise<{ ok: boolean; message: string; shortcut_health: string; runtime_status: string; repaired: boolean }>,
@@ -40,6 +51,32 @@ export function registerIpcHandlers(
   commitDictionaryImport: (preview: DictionaryImportPreview) => DictionaryViewData,
   selectDictionaryImportFile: () => Promise<DictionaryImportPreview | null>,
   exportDictionary: () => Promise<{ ok: boolean; path?: string }>,
+  getOfficeTemplateCatalog: () => OfficeTemplateCatalog,
+  organizeClipboardText: () => OfficeWorkspaceResult,
+  organizeSelectedText: () => Promise<OfficeWorkspaceResult>,
+  importOfficeFile: () => Promise<OfficeWorkspaceResult>,
+  getOfficeHistory: () => OfficeHistoryItem[],
+  clearOfficeHistory: () => OfficeHistoryItem[],
+  exportOfficeDocx: (payload: { title?: string; content?: string }) => Promise<{ ok: boolean; path?: string; error?: string }>,
+  generateWeeklyReport: () => Promise<StreamingAiPanelState>,
+  setOfficePanelMode: (mode: OfficePanelMode) => StreamingAiPanelState,
+  setIndustryPack: (industryPack: IndustryPackId) => StreamingAiPanelState,
+  probeDictionary: (text: string, industryPack: IndustryPackId) => DictionaryProbeResult,
+  getIndustryTermStats: () => IndustryTermStats,
+  importIndustryTerms: () => Promise<IndustryTermImportResult>,
+  clearIndustryTerms: () => IndustryTermStats,
+  testShortcut: (actionId: 'dictation' | 'translation' | 'voice_ask') => Promise<ShortcutTestResult>,
+  getVoiceAskState: () => VoiceAskState,
+  showVoiceAskPanel: () => VoiceAskState,
+  startVoiceAsk: () => void,
+  askVoiceQuestionText: (question: string) => Promise<VoiceAskState>,
+  setVoiceAskAction: (action: VoiceAskState['action']) => VoiceAskState,
+  createVoiceAskConversation: () => VoiceAskState,
+  selectVoiceAskConversation: (id: string) => VoiceAskState,
+  renameVoiceAskConversation: (id: string, title: string) => VoiceAskState,
+  deleteVoiceAskConversation: (id: string) => VoiceAskState,
+  copyVoiceAskAnswer: () => VoiceAskState,
+  applyVoiceAskAnswer: () => Promise<VoiceAskState>,
   getStreamingAiPanelState: () => StreamingAiPanelState,
   showStreamingAiPanel: () => StreamingAiPanelState,
   clearStreamingAiPanel: () => StreamingAiPanelState,
@@ -52,12 +89,13 @@ export function registerIpcHandlers(
   ipcMain.handle('get_snapshot', () => getSnapshot());
   ipcMain.handle('get_settings_view_data', () => getSettingsViewData());
   ipcMain.handle('save_settings', (_event, { settings }) => saveSettings(settings));
-  ipcMain.handle('open_settings', () => openSettings());
+  ipcMain.handle('open_settings', (_event, args?: { focus?: string }) => openSettings(args?.focus));
   ipcMain.handle('open_accessibility_settings', () => openAccessibilitySettings());
   ipcMain.handle('open_microphone_settings', () => openMicrophoneSettings());
   ipcMain.handle('open_input_monitoring_settings', () => openInputMonitoringSettings());
   ipcMain.handle('open_log_directory', () => openLogDirectory());
   ipcMain.handle('open_feedback_email', () => openFeedbackEmail());
+  ipcMain.handle('open_api_key_page', (_event, providerKey: string) => openApiKeyPage(providerKey));
   ipcMain.handle('run_asr_diagnostics', () => runAsrDiagnostics());
   ipcMain.handle('install_runtime_dependency', () => installRuntimeDependency());
   ipcMain.handle('repair_shortcuts_and_recorder', () => repairShortcutsAndRecorder());
@@ -75,6 +113,32 @@ export function registerIpcHandlers(
   ipcMain.handle('commit_dictionary_import', (_event, preview) => commitDictionaryImport(preview));
   ipcMain.handle('select_dictionary_import_file', () => selectDictionaryImportFile());
   ipcMain.handle('export_dictionary', () => exportDictionary());
+  ipcMain.handle('get_office_template_catalog', () => getOfficeTemplateCatalog());
+  ipcMain.handle('organize_clipboard_text', () => organizeClipboardText());
+  ipcMain.handle('organize_selected_text', () => organizeSelectedText());
+  ipcMain.handle('import_office_file', () => importOfficeFile());
+  ipcMain.handle('get_office_history', () => getOfficeHistory());
+  ipcMain.handle('clear_office_history', () => clearOfficeHistory());
+  ipcMain.handle('export_office_docx', (_event, payload) => exportOfficeDocx(payload ?? {}));
+  ipcMain.handle('generate_weekly_report', () => generateWeeklyReport());
+  ipcMain.handle('set_office_panel_mode', (_event, mode) => setOfficePanelMode(mode));
+  ipcMain.handle('set_industry_pack', (_event, industryPack) => setIndustryPack(industryPack));
+  ipcMain.handle('probe_dictionary', (_event, { text, industryPack }) => probeDictionary(text, industryPack));
+  ipcMain.handle('get_industry_term_stats', () => getIndustryTermStats());
+  ipcMain.handle('import_industry_terms', () => importIndustryTerms());
+  ipcMain.handle('clear_industry_terms', () => clearIndustryTerms());
+  ipcMain.handle('test_shortcut', (_event, actionId) => testShortcut(actionId));
+  ipcMain.handle('get_voice_ask_state', () => getVoiceAskState());
+  ipcMain.handle('show_voice_ask_panel', () => showVoiceAskPanel());
+  ipcMain.handle('start_voice_ask', () => startVoiceAsk());
+  ipcMain.handle('ask_voice_question_text', (_event, question: string) => askVoiceQuestionText(question));
+  ipcMain.handle('set_voice_ask_action', (_event, action) => setVoiceAskAction(action));
+  ipcMain.handle('create_voice_ask_conversation', () => createVoiceAskConversation());
+  ipcMain.handle('select_voice_ask_conversation', (_event, id: string) => selectVoiceAskConversation(id));
+  ipcMain.handle('rename_voice_ask_conversation', (_event, { id, title }) => renameVoiceAskConversation(id, title));
+  ipcMain.handle('delete_voice_ask_conversation', (_event, id: string) => deleteVoiceAskConversation(id));
+  ipcMain.handle('copy_voice_ask_answer', () => copyVoiceAskAnswer());
+  ipcMain.handle('apply_voice_ask_answer', () => applyVoiceAskAnswer());
   ipcMain.handle('get_streaming_ai_panel_state', () => getStreamingAiPanelState());
   ipcMain.handle('show_streaming_ai_panel', () => showStreamingAiPanel());
   ipcMain.handle('clear_streaming_ai_panel', () => clearStreamingAiPanel());

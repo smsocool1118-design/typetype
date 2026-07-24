@@ -10,6 +10,7 @@ export interface AsrHotwordContext {
   codeSwitchTerms?: string[];
   dictionaryTerms?: string[];
   systemTerms?: string[];
+  industryTerms?: string[];
 }
 
 const MAX_HOTWORD_COUNT = 5000;
@@ -34,6 +35,7 @@ export class AsrHotwordManager {
 
     const terms = buildHotwordTerms([
       ...(context.dictionaryTerms ?? []),
+      ...(context.industryTerms ?? []),
       ...(context.systemTerms ?? []),
       ...(context.codeSwitchTerms ?? []),
       ...context.settings.custom_dictionary.flatMap((entry) => [entry.from, entry.to]),

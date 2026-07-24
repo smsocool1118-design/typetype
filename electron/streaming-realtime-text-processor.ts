@@ -1,6 +1,6 @@
 import { CodeSwitchApplyResult } from './code-switch-lexicon';
 import { Settings } from './types';
-import { cleanupTranscript, mergeTranscriptText, stripUnknownTokens } from './transcript-cleanup';
+import { cleanupTranscript, collapseRunawayRepetition, mergeTranscriptText, stripUnknownTokens } from './transcript-cleanup';
 import { applyVoiceFormattingCommands } from './transcript-formatting';
 import { TextNormalizationEngine } from './text-normalization-engine';
 import { StreamingPauseReason } from './streaming-segmentation';
@@ -116,7 +116,8 @@ export class StreamingRealtimeTextProcessor {
     settings: Settings,
     options: StreamingStableSegmentOptions = {}
   ): StreamingRealtimeProcessResult {
-    const rawText = stripUnknownTokens(rawCumulativeText);
+    // 先折叠模型的字符卡壳重复（"大大大大大大"→"大大"），再算增量，从源头消除重复。
+    const rawText = collapseRunawayRepetition(stripUnknownTokens(rawCumulativeText));
     const rawDelta = getAppendDelta(this.rawText, rawText);
     const displayDelta = this.cleanRealtimeDelta(rawDelta, settings);
     const realtimeText = displayDelta
@@ -190,6 +191,9 @@ export class StreamingRealtimeTextProcessor {
     const stableTail = this.processStableSegment(tail, settings, {
       final: false,
       stablePause: options.stablePause,
+      // 透传停顿信息，否则 hard_pause 的句号规则在实时路径永远拿不到 pauseReason/pauseMs。
+      pauseMs: options.pauseMs,
+      pauseReason: options.pauseReason,
     });
     return `${prefix}${stableTail}`;
   }
@@ -207,12 +211,16 @@ export class StreamingRealtimeTextProcessor {
     const stableChars = Array.from(stableText);
     const charsToReplace = realtimeChars.length - commonPrefixLength;
     const replacementText = stableChars.slice(commonPrefixLength).join('');
+    const replacedText = realtimeChars.slice(commonPrefixLength).join('');
 
-    if (
-      charsToReplace < MIN_TAIL_REPLACE_CHARS
-      || charsToReplace > MAX_TAIL_REPLACE_CHARS
-      || !replacementText
-    ) {
+    if (!replacementText || charsToReplace > MAX_TAIL_REPLACE_CHARS || charsToReplace < 0) {
+      return null;
+    }
+
+    // 纯追加标点（charsToReplace=0）或"只新增标点、其余字不变"的小改动，必须放行——
+    // 否则停顿处加的 ，/。（差异很小）会被 MIN_TAIL_REPLACE_CHARS 门槛吞掉，导致实时原文永远没标点。
+    const isPunctuationOnlyCorrection = charsToReplace === 0 || isPunctuationOnlyDiff(replacedText, replacementText);
+    if (!isPunctuationOnlyCorrection && charsToReplace < MIN_TAIL_REPLACE_CHARS) {
       return null;
     }
 
@@ -222,6 +230,15 @@ export class StreamingRealtimeTextProcessor {
       correctedRealtimeText: stableText,
     };
   }
+}
+
+const PUNCTUATION_RE = /[，。！？、；：,.!?;:…—]/gu;
+// 差异是否"只是新增标点"：去掉标点后两串相等，且替换串更长（新增了标点）。
+function isPunctuationOnlyDiff(replaced: string, replacement: string): boolean {
+  return (
+    replacement.length > replaced.length
+    && replaced.replace(PUNCTUATION_RE, '') === replacement.replace(PUNCTUATION_RE, '')
+  );
 }
 
 function applyExplicitPunctuationCommands(text: string): string {
@@ -263,11 +280,12 @@ function applyStableStreamingPunctuation(
     const lastClause = getLastClause(result);
     const lastClauseLength = Array.from(lastClause).length;
     const hardPause = options.pauseReason === 'hard_pause' || (options.pauseMs ?? 0) >= 700;
-    if (hardPause && lastClauseLength >= 6 && COMPLETE_CLAUSE_END_RE.test(lastClause)) {
+    // 只在"硬停顿 + 句末完整"时补句号（如"…下了""…可以"）。
+    // **不再在任意短停顿处加逗号**——那会把"飞翔"这类词从中间切成"飞，翔"（用户反馈的错标点）。
+    // 逗号只来自明确的转折词（但是/所以/然后，见 insertSemanticBoundaryPunctuation）和问句，位置可靠。
+    // 更密的语义断句由 AI 修正原文 / 终稿（本地标点模型）负责。
+    if (hardPause && lastClauseLength >= 4 && COMPLETE_CLAUSE_END_RE.test(lastClause)) {
       return `${result}。`;
-    }
-    if (lastClauseLength >= 8) {
-      return `${result}，`;
     }
   }
 
@@ -341,21 +359,16 @@ function getAppendDelta(previous: string, current: string): string {
     return current.slice(previous.length);
   }
 
+  // 模型回改（current 不再以 previous 为前缀，流式常态）：**绝不返回整段 current**——
+  // 老逻辑在回改超过 120 字窗口时 `return current`，拼接层再 append 一遍整段 → 就是用户看到的
+  // "今天我们…今天我们…"整段重复。改为只取"比上次更长的尾部增量"；长度未增长则不追加，
+  // 回改的中段交给尾部纠错/终稿处理，宁可少显示也不重复。
   const previousChars = Array.from(previous);
   const currentChars = Array.from(current);
-  let index = 0;
-  while (
-    index < previousChars.length
-    && index < currentChars.length
-    && previousChars[index] === currentChars[index]
-  ) {
-    index += 1;
-  }
-
-  if (index >= previousChars.length - DEFAULT_TAIL_WINDOW_CHARS) {
+  if (currentChars.length > previousChars.length) {
     return currentChars.slice(previousChars.length).join('');
   }
-  return current;
+  return '';
 }
 
 function commonPrefixCharLength(left: string, right: string): number {

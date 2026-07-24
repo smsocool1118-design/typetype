@@ -7,20 +7,41 @@ const panels = Array.from(document.querySelectorAll(".settings-panel"));
 const microphoneSelect = document.querySelector("#microphone_id");
 const hotkeySelect = document.querySelector("#hotkey");
 const translateHotkeySelect = document.querySelector("#translate_hotkey");
+const voiceAskHotkeySelect = document.querySelector("#voice_ask_hotkey");
 const hotkeyProfileDefaultButton = document.querySelector("#hotkey-profile-default");
 const hotkeyProfileAltButton = document.querySelector("#hotkey-profile-alt");
 const autoPasteToggle = document.querySelector("#auto_paste");
 const launchAtLoginToggle = document.querySelector("#launch_at_login");
 const recognitionModeSelect = document.querySelector("#recognition_mode");
 const streamingModelSelect = document.querySelector("#streaming_model");
+const liveStreamingToggle = document.querySelector("#live_streaming_toggle");
+
+// 傻瓜式"边说边出字"总开关：开=流式输出+实时模型，关=非流式。与下方高级下拉双向同步。
+function isLiveStreamingActive() {
+  // 流式统一为分段近实时离线；开关只表示"是否流式输出"。
+  return recognitionModeSelect.value === "streaming_output";
+}
+function syncLiveStreamingToggle() {
+  if (liveStreamingToggle) {
+    liveStreamingToggle.checked = isLiveStreamingActive();
+  }
+}
+const senseVoiceLanguageSelect = document.querySelector("#sense_voice_language");
 const voicePackageSelect = document.querySelector("#voice_package");
 const voiceFormattingToggle = document.querySelector("#voice_formatting_enabled");
+const insertRefinedStreamingToggle = document.querySelector("#insert_refined_streaming");
+const autoApplyFinalRefinedToggle = document.querySelector("#auto_apply_final_refined");
+const officeHistoryEnabledToggle = document.querySelector("#office_history_enabled");
 const autoLearningToggle = document.querySelector("#auto_learning_enabled");
+const pinyinCorrectionToggle = document.querySelector("#pinyin_correction_enabled");
+const voiceAskWebSearchToggle = document.querySelector("#voice_ask_web_search");
 const streamingAiPanelToggle = document.querySelector("#streaming_ai_panel_enabled");
 const streamingEnhancementModeSelect = document.querySelector("#streaming_enhancement_mode");
 const computeBackendSelect = document.querySelector("#compute_backend");
 const translationTargetLanguageSelect = document.querySelector("#translation_target_language");
 const rewriteScenarioSelect = document.querySelector("#rewrite_scenario");
+const industryPackSelect = document.querySelector("#active_industry_pack");
+const officePanelModeSelect = document.querySelector("#office_panel_mode");
 const modelPathTextarea = document.querySelector("#model_path");
 const dictionaryStats = document.querySelector("#dictionary-stats");
 const dictionarySearchInput = document.querySelector("#dictionary-search");
@@ -29,7 +50,6 @@ const dictionaryEditor = document.querySelector("#dictionary-editor");
 const dictionaryTermInput = document.querySelector("#dictionary-term-input");
 const dictionaryAliasInput = document.querySelector("#dictionary-alias-input");
 const dictionaryAddTermButton = document.querySelector("#dictionary-add-term-button");
-const dictionaryAddReplacementButton = document.querySelector("#dictionary-add-replacement-button");
 const dictionaryShowImportButton = document.querySelector("#dictionary-show-import-button");
 const dictionaryEditorTitle = document.querySelector("#dictionary-editor-title");
 const dictionaryEditorHelp = document.querySelector("#dictionary-editor-help");
@@ -49,17 +69,26 @@ const dictionaryHelpDialog = document.querySelector("#dictionary-help-dialog");
 const dictionaryHelpCloseButton = document.querySelector("#dictionary-help-close-button");
 const dictionaryCopyExampleButton = document.querySelector("#dictionary-copy-example-button");
 const dictionaryHelpExample = document.querySelector("#dictionary-help-example");
+const dictionaryProbeInput = document.querySelector("#dictionary-probe-input");
+const dictionaryProbeButton = document.querySelector("#dictionary-probe-button");
+const dictionaryProbeResult = document.querySelector("#dictionary-probe-result");
+const hotkeyTestStatus = document.querySelector("#hotkey-test-status");
+const officeHistoryList = document.querySelector("#office-history-list");
 
 // LLM rewrite settings
 const llmEnabledToggle = document.querySelector("#llm_enabled");
 const llmConfigPanel = document.querySelector("#llm-config-panel");
 const llmProviderSelect = document.querySelector("#llm_provider");
+const llmTierSelect = document.querySelector("#llm_tier");
 const llmBaseUrlInput = document.querySelector("#llm_base_url");
 const llmBaseUrlDescription = document.querySelector("#llm-base-url-description");
 const llmApiKeyInput = document.querySelector("#llm_api_key");
 const llmApiKeyDescription = document.querySelector("#llm-api-key-description");
 const llmModelInput = document.querySelector("#llm_model");
 const llmModelDescription = document.querySelector("#llm-model-description");
+const llmModelSelect = document.querySelector("#llm_model_select");
+const llmApiKeyPathText = document.querySelector("#llm-api-key-path");
+const llmOpenApiKeyPageButton = document.querySelector("#llm-open-api-key-page");
 const llmTestButton = document.querySelector("#llm-test-button");
 const llmTestStatus = document.querySelector("#llm-test-status");
 const llmActiveRouteLabel = document.querySelector("#llm-active-route-label");
@@ -92,153 +121,185 @@ let dictionaryView = null;
 let activeDictionaryEntryId = null;
 let dictionaryEditorMode = "term";
 let pendingDictionaryImportPreview = null;
+let officeCatalog = { templates: [], industry_packs: [] };
 
 const TEXT_INPUT_SAVE_DELAY_MS = 450;
 
 const LLM_PROVIDER_PRESETS = {
-  openai: {
-    label: "OpenAI",
-    provider: "openai",
-    base_url: "https://api.openai.com/v1",
-    model: "gpt-5.1",
-    temperature: 0.3,
-    apiKeyHelp: "请填写 OpenAI Platform API Key；ChatGPT Plus/Pro 订阅不等于 API 免费额度。获取地址：https://platform.openai.com/api-keys",
-    placeholder: "粘贴 OpenAI Platform API Key",
-  },
   minimax_cn: {
     label: "MiniMax 国内版",
     provider: "compatible",
     base_url: "https://api.minimaxi.com/v1",
-    model: "MiniMax-M2.7",
+    model: "MiniMax-M2.7-highspeed",
+    models: { economy: "MiniMax-M2.7-highspeed", standard: "MiniMax-M2.7", premium: "MiniMax-M2.7" },
+    modelOptions: [
+      { value: "MiniMax-M2.7-highspeed", label: "MiniMax-M2.7-highspeed（轻量·响应快）" },
+      { value: "MiniMax-M2.7", label: "MiniMax-M2.7（标准）" },
+    ],
+    search: true,
     temperature: 0.3,
     apiKeyHelp: "请填写 MiniMax 国内平台生成的 API Key；国内 Key 不要选择 MiniMax 国际版。",
     placeholder: "粘贴 MiniMax 国内 API Key",
-  },
-  minimax_intl: {
-    label: "MiniMax 国际版",
-    provider: "compatible",
-    base_url: "https://api.minimax.io/v1",
-    model: "MiniMax-M2.7",
-    temperature: 0.3,
-    apiKeyHelp: "请填写 MiniMax 国际平台生成的 API Key；国际 Key 不要选择 MiniMax 国内版。",
-    placeholder: "粘贴 MiniMax 国际 API Key",
+    apiKeyUrl: "https://platform.minimaxi.com/user-center/basic-information/interface-key",
+    consoleUrl: "https://platform.minimaxi.com/",
+    apiKeyPath: "登录后：用户中心 → 基本信息 → 接口密钥 → 新建",
   },
   deepseek: {
     label: "DeepSeek",
     provider: "compatible",
     base_url: "https://api.deepseek.com",
+    // 旧名 deepseek-chat / deepseek-reasoner 已于 2026-07-24 下线，统一用 V4 系列。
     model: "deepseek-v4-flash",
+    models: { economy: "deepseek-v4-flash", standard: "deepseek-v4-flash", premium: "deepseek-v4-pro" },
+    modelOptions: [
+      { value: "deepseek-v4-flash", label: "deepseek-v4-flash（快速·非思考）" },
+      { value: "deepseek-v4-pro", label: "deepseek-v4-pro（高精·深度思考）" },
+    ],
+    search: false,
+    thinking: "deepseek",
     temperature: 0.3,
-    apiKeyHelp: "请填写 DeepSeek 平台生成的 API Key，不要填写 OpenAI 或其他平台的 Key。",
+    apiKeyHelp: "请填写 DeepSeek 平台生成的 API Key，不要填写其他平台的 Key。",
     placeholder: "粘贴 DeepSeek API Key",
+    apiKeyUrl: "https://platform.deepseek.com/api_keys",
+    consoleUrl: "https://platform.deepseek.com/",
+    apiKeyPath: "登录后：控制台 → API keys → Create new API key",
   },
   qwen_cn: {
     label: "通义千问 / 阿里云百炼（北京）",
     provider: "compatible",
     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    model: "qwen-plus",
+    model: "qwen3.6-flash",
+    models: { economy: "qwen3.6-flash", standard: "qwen3.7-plus", premium: "qwen3.7-max" },
+    modelOptions: [
+      { value: "qwen3.6-flash", label: "qwen3.6-flash（轻量·免费额度）" },
+      { value: "qwen3.7-plus", label: "qwen3.7-plus（标准·办公推荐）" },
+      { value: "qwen3.7-max", label: "qwen3.7-max（高精·较慢较贵）" },
+    ],
+    search: true,
+    thinking: "qwen",
     temperature: 0.3,
-    apiKeyHelp: "请填写阿里云百炼北京地域的 API Key；地域和 API Key 所属控制台要一致。",
+    supportsSearch: true,
+    apiKeyHelp: "请填写阿里云百炼北京地域的 API Key；地域和 API Key 所属控制台要一致。支持语音问答联网（可问天气/实时信息，无需额外搜索 Key）。",
     placeholder: "粘贴通义千问北京地域 API Key",
-  },
-  qwen_sg: {
-    label: "通义千问 / 阿里云百炼（新加坡）",
-    provider: "compatible",
-    base_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-    model: "qwen-plus",
-    temperature: 0.3,
-    apiKeyHelp: "请填写阿里云百炼新加坡地域的 API Key；地域和 API Key 所属控制台要一致。",
-    placeholder: "粘贴通义千问新加坡 API Key",
-  },
-  qwen_us: {
-    label: "通义千问 / 阿里云百炼（美国）",
-    provider: "compatible",
-    base_url: "https://dashscope-us.aliyuncs.com/compatible-mode/v1",
-    model: "qwen-plus",
-    temperature: 0.3,
-    apiKeyHelp: "请填写阿里云百炼美国弗吉尼亚地域的 API Key；地域和 API Key 所属控制台要一致。",
-    placeholder: "粘贴通义千问美国 API Key",
+    apiKeyUrl: "https://bailian.console.aliyun.com/?apiKey=1",
+    consoleUrl: "https://bailian.console.aliyun.com/",
+    apiKeyPath: "登录后：右上角头像 → API-KEY → 创建我的 API-KEY（选北京地域）",
   },
   zhipu: {
     label: "智谱 GLM",
     provider: "compatible",
     base_url: "https://open.bigmodel.cn/api/paas/v4",
     model: "glm-4.7-flash",
+    models: { economy: "glm-4.7-flash", standard: "glm-4.7", premium: "glm-5.2" },
+    modelOptions: [
+      { value: "glm-4.7-flash", label: "glm-4.7-flash（轻量·免费额度·限速较严）" },
+      { value: "glm-4.7", label: "glm-4.7（标准·办公推荐）" },
+      { value: "glm-5.2", label: "glm-5.2（高精·长文/复杂任务）" },
+    ],
+    search: true,
+    thinking: "glm",
     temperature: 0.3,
-    apiKeyHelp: "请填写智谱开放平台 API Key，不要填写 OpenAI 或其他平台的 Key。",
+    supportsSearch: true,
+    apiKeyHelp: "请填写智谱开放平台 API Key，不要填写其他平台的 Key。支持语音问答联网（可问天气/实时信息，无需额外搜索 Key）。",
     placeholder: "粘贴智谱 API Key",
+    apiKeyUrl: "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
+    consoleUrl: "https://bigmodel.cn/",
+    apiKeyPath: "登录后：用户中心 → 项目管理 → API Keys → 添加新的 API Key",
   },
   kimi_cn: {
     label: "Kimi / 月之暗面国内版",
     provider: "compatible",
     base_url: "https://api.moonshot.cn/v1",
-    model: "moonshot-v1-8k",
+    // moonshot-v1-* 与 kimi-k2 系列均已停止维护，统一用 kimi-k3。
+    model: "kimi-k3",
+    models: { economy: "kimi-k3", standard: "kimi-k3", premium: "kimi-k3" },
+    modelOptions: [{ value: "kimi-k3", label: "kimi-k3（最新旗舰）" }],
+    search: true,
     temperature: 1,
     apiKeyHelp: "请填写 Kimi 国内开放平台 API Key；国内 Key 应使用 api.moonshot.cn。",
     placeholder: "粘贴 Kimi 国内 API Key",
-  },
-  kimi_intl: {
-    label: "Kimi 国际版",
-    provider: "compatible",
-    base_url: "https://api.moonshot.ai/v1",
-    model: "moonshot-v1-8k",
-    temperature: 1,
-    apiKeyHelp: "请填写 Kimi 国际平台 API Key；国际 Key 应使用 api.moonshot.ai。",
-    placeholder: "粘贴 Kimi 国际 API Key",
+    apiKeyUrl: "https://platform.moonshot.cn/console/api-keys",
+    consoleUrl: "https://platform.moonshot.cn/",
+    apiKeyPath: "登录后：用户中心 → API Key 管理 → 新建",
   },
   siliconflow: {
     label: "硅基流动",
     provider: "compatible",
     base_url: "https://api.siliconflow.cn/v1",
     model: "zai-org/GLM-4.7-Flash",
+    models: { economy: "zai-org/GLM-4.7-Flash", standard: "zai-org/GLM-4.7", premium: "zai-org/GLM-4.7" },
+    modelOptions: [
+      { value: "zai-org/GLM-4.7-Flash", label: "GLM-4.7-Flash（轻量）" },
+      { value: "zai-org/GLM-4.7", label: "GLM-4.7（标准）" },
+      { value: "deepseek-ai/DeepSeek-V4", label: "DeepSeek-V4（DeepSeek 官方权重）" },
+      { value: "Qwen/Qwen3-235B-A22B-Instruct-2507", label: "Qwen3-235B（大模型）" },
+    ],
+    search: false,
     temperature: 0.3,
     apiKeyHelp: "请填写硅基流动 API Key。",
     placeholder: "粘贴硅基流动 API Key",
+    apiKeyUrl: "https://cloud.siliconflow.cn/account/ak",
+    consoleUrl: "https://cloud.siliconflow.cn/",
+    apiKeyPath: "登录后：账户管理 → API 密钥 → 新建 API 密钥",
   },
   baidu_cn: {
     label: "百度千帆国内版",
     provider: "compatible",
     base_url: "https://qianfan.baidubce.com/v2",
     model: "ernie-speed-pro-128k",
+    models: { economy: "ernie-speed-pro-128k", standard: "ernie-4.0-turbo-8k", premium: "ernie-4.0-turbo-8k" },
+    modelOptions: [
+      { value: "ernie-speed-pro-128k", label: "ernie-speed-pro-128k（轻量·长上下文）" },
+      { value: "ernie-4.0-turbo-8k", label: "ernie-4.0-turbo-8k（标准）" },
+    ],
+    search: true,
     temperature: 0.3,
     apiKeyHelp: "请填写百度千帆国内平台 API Key。",
     placeholder: "粘贴百度千帆国内 API Key",
-  },
-  baidu_intl: {
-    label: "百度千帆国际版",
-    provider: "compatible",
-    base_url: "https://api.baiduqianfan.ai/v1",
-    model: "ernie-speed-pro-128k",
-    temperature: 0.3,
-    apiKeyHelp: "请填写百度千帆国际平台 API Key。国内和国际 Key 不要混用。",
-    placeholder: "粘贴百度千帆国际 API Key",
-  },
-  gemini: {
-    label: "Google Gemini",
-    provider: "compatible",
-    base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
-    model: "gemini-2.5-flash",
-    temperature: 0.3,
-    apiKeyHelp: "请填写 Google AI Studio 生成的 Gemini API Key。",
-    placeholder: "粘贴 Gemini API Key",
+    apiKeyUrl: "https://console.bce.baidu.com/qianfan/ais/console/applicationConsole/password",
+    consoleUrl: "https://console.bce.baidu.com/qianfan/",
+    apiKeyPath: "登录后：千帆控制台 → 应用接入 → 应用密钥 → 创建应用",
   },
   baichuan: {
     label: "百川智能",
     provider: "compatible",
     base_url: "https://api.baichuan-ai.com/v1",
-    model: "Baichuan4",
+    model: "Baichuan4-Air",
+    models: { economy: "Baichuan4-Air", standard: "Baichuan4", premium: "Baichuan4" },
+    modelOptions: [
+      { value: "Baichuan4-Air", label: "Baichuan4-Air（轻量）" },
+      { value: "Baichuan4", label: "Baichuan4（标准）" },
+    ],
+    search: false,
     temperature: 0.3,
-    apiKeyHelp: "请填写百川智能平台生成的 API Key，不要填写 OpenAI 或其他平台的 Key。",
+    apiKeyHelp: "请填写百川智能平台生成的 API Key，不要填写其他平台的 Key。",
     placeholder: "粘贴百川 API Key",
+    apiKeyUrl: "https://platform.baichuan-ai.com/console/apikey",
+    consoleUrl: "https://platform.baichuan-ai.com/",
+    apiKeyPath: "登录后：控制台 → 接口密钥 → 创建密钥",
   },
   doubao: {
     label: "豆包 / 火山方舟",
     provider: "compatible",
     base_url: "https://ark.cn-beijing.volces.com/api/v3",
     model: "doubao-seed-1-6-250615",
+    models: {
+      economy: "doubao-seed-1-6-250615",
+      standard: "doubao-seed-2-1-pro",
+      premium: "doubao-seed-2-1-pro",
+    },
+    modelOptions: [
+      { value: "doubao-seed-1-6-250615", label: "doubao-seed-1-6（轻量）" },
+      { value: "doubao-seed-2-1-pro", label: "doubao-seed-2-1-pro（标准/高精）" },
+    ],
+    search: true,
+    thinking: "doubao",
     temperature: 0.3,
-    apiKeyHelp: "请填写火山方舟/豆包平台生成的 API Key，不要填写 OpenAI 或其他平台的 Key。",
+    apiKeyHelp: "请填写火山方舟/豆包平台生成的 API Key，不要填写其他平台的 Key。",
     placeholder: "粘贴豆包 API Key",
+    apiKeyUrl: "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
+    consoleUrl: "https://console.volcengine.com/ark",
+    apiKeyPath: "登录后：方舟控制台 → 系统管理 → API Key 管理 → 创建 API Key",
   },
 };
 
@@ -273,6 +334,28 @@ function activatePanel(panelId) {
   const label = activeItem?.textContent?.trim() || "设置";
   panelTitle.textContent = label;
   panelKicker.textContent = label;
+  if (panelId === "panel-office") {
+    void loadOfficeHistory();
+  }
+}
+
+async function loadOfficeHistory() {
+  if (!officeHistoryList) return;
+  const items = await electronAPI.getOfficeHistory();
+  officeHistoryList.innerHTML = items.length
+    ? items.map((item) => `<article class="dictionary-item"><div class="dictionary-item-main"><div class="dictionary-item-title"><strong>${escapeHtml(item.title)}</strong><span class="dictionary-kind">${escapeHtml(item.source)}</span></div><div class="dictionary-item-meta">${escapeHtml(item.text_preview)} · ${new Date(item.created_at).toLocaleString()}</div></div></article>`).join("")
+    : '<div class="dictionary-empty">暂无办公任务记录。</div>';
+}
+
+async function runOfficeWorkspaceAction(action, pendingMessage) {
+  setStatus(pendingMessage);
+  try {
+    const result = await action();
+    setStatus(result.message, result.ok ? "default" : "error");
+    await loadOfficeHistory();
+  } catch (error) {
+    setStatus(error?.message || "办公任务没有完成。", "error");
+  }
 }
 
 function populateMicrophoneSelect(microphones, selectedId) {
@@ -310,38 +393,91 @@ function populateHotkeySelect(selectElement, hotkeys, selectedValue) {
 }
 
 function getLlmPreset(key) {
-  return LLM_PROVIDER_PRESETS[key] ?? LLM_PROVIDER_PRESETS.openai;
+  return LLM_PROVIDER_PRESETS[key] ?? LLM_PROVIDER_PRESETS.deepseek;
+}
+
+function populateOfficeCatalog(catalog, selectedTemplate, selectedIndustry) {
+  const industryId = selectedIndustry || "general_office";
+  // 该行业专属的文书置顶成独立分组，其余模板照旧按大类排列（不禁用，仍可自由组合）。
+  const packCount = (catalog.industry_packs ?? []).length;
+  const ownIds = new Set(
+    (catalog.templates ?? [])
+      .filter((template) => {
+        const packs = template.industry_packs ?? [];
+        // 全行业通用的模板不算"本行业专属"，只有明确限定了适用行业的才置顶。
+        return packs.length > 0 && packs.length < packCount && packs.includes(industryId);
+      })
+      .map((template) => template.id)
+  );
+
+  const groups = new Map();
+  const ownTemplates = [];
+  for (const template of catalog.templates ?? []) {
+    if (ownIds.has(template.id)) {
+      ownTemplates.push(template);
+      continue;
+    }
+    if (!groups.has(template.group)) {
+      groups.set(template.group, []);
+    }
+    groups.get(template.group).push(template);
+  }
+  rewriteScenarioSelect.innerHTML = "";
+  if (ownTemplates.length > 0) {
+    const group = document.createElement("optgroup");
+    group.label = "本行业专用文书";
+    for (const template of ownTemplates) {
+      const option = document.createElement("option");
+      option.value = template.id;
+      option.textContent = template.name;
+      group.append(option);
+    }
+    rewriteScenarioSelect.append(group);
+  }
+  for (const [label, templates] of groups) {
+    const group = document.createElement("optgroup");
+    group.label = label;
+    for (const template of templates) {
+      const option = document.createElement("option");
+      option.value = template.id;
+      option.textContent = template.name;
+      group.append(option);
+    }
+    rewriteScenarioSelect.append(group);
+  }
+  rewriteScenarioSelect.value = selectedTemplate || "general";
+
+  industryPackSelect.innerHTML = "";
+  for (const pack of catalog.industry_packs ?? []) {
+    const option = document.createElement("option");
+    option.value = pack.id;
+    option.textContent = pack.name;
+    industryPackSelect.append(option);
+  }
+  industryPackSelect.value = selectedIndustry || "general_office";
 }
 
 function inferLlmPresetKey(rewrite = {}) {
-  const provider = (rewrite.provider || "").toLowerCase();
   const baseUrl = (rewrite.base_url || "").toLowerCase();
   const model = (rewrite.model || "").toLowerCase();
 
   const matches = [
     ["minimax_cn", () => baseUrl.includes("api.minimaxi.com")],
-    ["minimax_intl", () => baseUrl.includes("api.minimax.io")],
     ["minimax_cn", () => model.includes("minimax")],
     ["deepseek", () => baseUrl.includes("deepseek") || model.includes("deepseek")],
     ["qwen_cn", () => baseUrl.includes("dashscope.aliyuncs.com")],
-    ["qwen_sg", () => baseUrl.includes("dashscope-intl.aliyuncs.com")],
-    ["qwen_us", () => baseUrl.includes("dashscope-us.aliyuncs.com")],
     ["qwen_cn", () => model.includes("qwen")],
     ["zhipu", () => baseUrl.includes("bigmodel.cn") || model.includes("glm")],
     ["kimi_cn", () => baseUrl.includes("moonshot.cn")],
-    ["kimi_intl", () => baseUrl.includes("moonshot.ai")],
     ["kimi_cn", () => model.includes("kimi")],
     ["siliconflow", () => baseUrl.includes("siliconflow")],
     ["baidu_cn", () => baseUrl.includes("qianfan.baidubce.com")],
-    ["baidu_intl", () => baseUrl.includes("baiduqianfan.ai")],
     ["baidu_cn", () => model.includes("ernie")],
-    ["gemini", () => baseUrl.includes("generativelanguage.googleapis.com") || model.includes("gemini")],
     ["baichuan", () => baseUrl.includes("baichuan-ai.com") || model.includes("baichuan")],
     ["doubao", () => baseUrl.includes("volces.com") || model.includes("doubao")],
-    ["openai", () => provider === "openai" || baseUrl.includes("api.openai.com") || /^gpt[-\w.]*|^o\d/.test(model)],
   ];
 
-  return matches.find(([, match]) => match())?.[0] ?? "openai";
+  return matches.find(([, match]) => match())?.[0] ?? "deepseek";
 }
 
 function updateLlmPresetHints(preset) {
@@ -349,9 +485,37 @@ function updateLlmPresetHints(preset) {
   llmApiKeyDescription.textContent = preset.apiKeyHelp;
   llmApiKeyInput.placeholder = preset.placeholder;
   llmModelDescription.textContent = `${preset.label} 已自动填写服务参数。`;
+  if (llmApiKeyPathText) {
+    llmApiKeyPathText.textContent = preset.apiKeyPath
+      || "登录该平台的控制台，找到 API Key 页面新建一个密钥并复制过来。";
+  }
+  if (llmOpenApiKeyPageButton) {
+    llmOpenApiKeyPageButton.disabled = !preset.apiKeyUrl;
+    llmOpenApiKeyPageButton.title = preset.apiKeyUrl || "";
+  }
 }
 
-function applyLlmPresetToControls(presetKey, { keepApiKey = true } = {}) {
+// 用预设的 modelOptions 重建"办公/问答模型"下拉，首项永远是"跟随档位"。
+function populateLlmModelSelect(preset, selectedValue) {
+  if (!llmModelSelect) return;
+  const options = preset.modelOptions ?? [];
+  llmModelSelect.innerHTML = "";
+  const follow = document.createElement("option");
+  follow.value = "";
+  follow.textContent = "跟随档位（推荐）";
+  llmModelSelect.append(follow);
+  for (const item of options) {
+    const opt = document.createElement("option");
+    opt.value = item.value;
+    opt.textContent = item.label;
+    llmModelSelect.append(opt);
+  }
+  const wanted = selectedValue ?? "";
+  const known = options.some((item) => item.value === wanted);
+  llmModelSelect.value = known ? wanted : "";
+}
+
+function applyLlmPresetToControls(presetKey, { keepApiKey = true, selectedModel = "" } = {}) {
   const preset = getLlmPreset(presetKey);
   const existingApiKey = llmApiKeyInput.value;
   llmProviderSelect.value = presetKey;
@@ -363,16 +527,38 @@ function applyLlmPresetToControls(presetKey, { keepApiKey = true } = {}) {
     llmApiKeyInput.value = existingApiKey;
   }
   updateLlmPresetHints(preset);
+  populateLlmModelSelect(preset, selectedModel);
+}
+
+// 档位只决定"办公/问答"用哪个模型；语音润写恒用该厂家最轻量的模型且不深度思考。
+function resolveTierModels(preset, tier) {
+  const models = preset.models ?? {};
+  const economy = models.economy ?? preset.model;
+  const officeModel = models[tier] ?? models.standard ?? preset.model;
+  return { rewriteModel: economy, officeModel };
 }
 
 function collectLlmRewriteConfig() {
   const preset = getLlmPreset(llmProviderSelect.value);
+  const tier = llmTierSelect?.value || "standard";
+  const { rewriteModel, officeModel } = resolveTierModels(preset, tier);
+  // 优先级：高级"服务参数"手填 > "办公/问答模型"下拉 > 档位自动路由。
+  // 只有手填了预设之外的型号才算自定义，否则一律按档位/下拉解析。
+  const typedModel = llmModelInput.value.trim();
+  const presetModels = [preset.model, ...Object.values(preset.models ?? {})];
+  const customModel = typedModel && !presetModels.includes(typedModel) ? typedModel : "";
+  const selectedModel = llmModelSelect?.value?.trim() ?? "";
+  const officeChoice = customModel || selectedModel || officeModel;
   return {
     enabled: llmEnabledToggle.checked,
     provider: preset.provider,
     api_key: llmApiKeyInput.value.trim(),
     base_url: llmBaseUrlInput.value.trim() || preset.base_url,
-    model: llmModelInput.value.trim() || preset.model,
+    model: customModel || rewriteModel,
+    office_model: officeChoice,
+    // 润写永远不开深度思考；高精档允许办公/问答思考。
+    enable_thinking: tier === "premium",
+    thinking_style: preset.thinking ?? "none",
     temperature: preset.temperature ?? currentSettings?.llm_rewrite?.temperature ?? 0.3,
     max_tokens: currentSettings?.llm_rewrite?.max_tokens ?? 4096,
   };
@@ -384,15 +570,28 @@ function fillSettingsView(view) {
 
   populateHotkeySelect(hotkeySelect, view.hotkeys, view.settings.hotkey);
   populateHotkeySelect(translateHotkeySelect, view.hotkeys, view.settings.translate_hotkey);
+  populateHotkeySelect(voiceAskHotkeySelect, view.hotkeys, view.settings.voice_ask_hotkey ?? "DoubleCtrl");
   currentSettings.hotkey = hotkeySelect.value;
   currentSettings.translate_hotkey = translateHotkeySelect.value;
+  currentSettings.voice_ask_hotkey = voiceAskHotkeySelect.value;
+  if (view.hotkey_backend_note) {
+    hotkeyTestStatus.textContent = view.hotkey_backend_note;
+    hotkeyTestStatus.dataset.tone = "error";
+  }
   autoPasteToggle.checked = view.settings.auto_paste;
   launchAtLoginToggle.checked = view.settings.launch_at_login ?? false;
   recognitionModeSelect.value = view.settings.recognition_mode ?? "non_streaming";
-  streamingModelSelect.value = view.settings.streaming_model ?? "multilingual_realtime";
+  streamingModelSelect.value = view.settings.streaming_model ?? "multilingual_segmented";
+  syncLiveStreamingToggle();
+  senseVoiceLanguageSelect.value = view.settings.sense_voice_language ?? "zh";
   voicePackageSelect.value = view.settings.voice_package ?? "fast_offline";
   voiceFormattingToggle.checked = view.settings.voice_formatting_enabled ?? true;
+  insertRefinedStreamingToggle.checked = view.settings.insert_refined_streaming ?? true;
+  autoApplyFinalRefinedToggle.checked = view.settings.auto_apply_final_refined ?? false;
+  officeHistoryEnabledToggle.checked = view.settings.office_history_enabled ?? true;
   autoLearningToggle.checked = view.settings.auto_learning_enabled ?? true;
+  pinyinCorrectionToggle.checked = view.settings.pinyin_correction_enabled ?? true;
+  voiceAskWebSearchToggle.checked = view.settings.voice_ask_web_search ?? true;
   streamingAiPanelToggle.checked = view.settings.streaming_ai_panel_enabled ?? false;
   streamingEnhancementModeSelect.value =
     view.settings.streaming_enhancement_mode === "online_enhanced"
@@ -400,7 +599,13 @@ function fillSettingsView(view) {
       : "offline_private";
   computeBackendSelect.value = view.settings.compute_backend ?? "auto";
   translationTargetLanguageSelect.value = view.settings.translation_target_language ?? "en";
-  rewriteScenarioSelect.value = view.settings.rewrite_scenario ?? "general";
+  populateOfficeCatalog(
+    officeCatalog,
+    view.settings.rewrite_scenario ?? "general",
+    view.settings.active_industry_pack ?? "general_office"
+  );
+  officePanelModeSelect.value = view.settings.office_panel_mode ?? "standard";
+  void refreshIndustryTermStats();
   modelPathTextarea.value = view.settings.model_path ?? "";
   populateMicrophoneSelect(view.microphones, view.settings.microphone_id);
 
@@ -408,15 +613,20 @@ function fillSettingsView(view) {
   const savedLlmRewrite = view.settings.llm_rewrite ?? {};
   const llmRewrite = {
     ...savedLlmRewrite,
-    provider: savedLlmRewrite.provider ?? "openai",
-    base_url: savedLlmRewrite.base_url ?? "https://api.openai.com/v1",
+    provider: savedLlmRewrite.provider ?? "compatible",
+    base_url: savedLlmRewrite.base_url ?? "https://api.deepseek.com",
     api_key: savedLlmRewrite.api_key ?? "",
-    model: savedLlmRewrite.model ?? "gpt-5.1",
+    model: savedLlmRewrite.model ?? "deepseek-v4-flash",
   };
   const llmProviderValue = inferLlmPresetKey(llmRewrite);
   llmEnabledToggle.checked = llmRewrite.enabled ?? false;
   llmApiKeyInput.value = llmRewrite.api_key;
-  applyLlmPresetToControls(llmProviderValue);
+  if (llmTierSelect) {
+    llmTierSelect.value = view.settings.llm_tier ?? "standard";
+  }
+  // 用保存的 office_model 预选下拉；若不是该厂家的预置型号，下拉自动回到"跟随档位"。
+  const savedOfficeModel = savedLlmRewrite.office_model ?? savedLlmRewrite.model ?? "";
+  applyLlmPresetToControls(llmProviderValue, { selectedModel: savedOfficeModel });
   llmBaseUrlInput.value = llmRewrite.base_url || getLlmPreset(llmProviderValue).base_url;
   llmModelInput.value = llmRewrite.model || getLlmPreset(llmProviderValue).model;
   currentSettings.llm_rewrite = {
@@ -460,7 +670,8 @@ function renderPreloadStatus(status = {}) {
     return;
   }
 
-  const items = [status.asr, status.punctuation, status.translation, status.dictionary, status.llm]
+  // runtime 放第一位：架构/模拟层问题是排查性能的第一现场。
+  const items = [status.runtime, status.asr, status.punctuation, status.translation, status.dictionary, status.llm]
     .filter(Boolean);
   preloadStatusGrid.innerHTML = items.map((item) => `
     <div class="preload-status-item" data-status="${escapeHtml(item.status)}">
@@ -478,22 +689,32 @@ function collectSettings() {
     ...currentSettings,
     hotkey: hotkeySelect.value,
     translate_hotkey: translateHotkeySelect.value,
+    voice_ask_hotkey: voiceAskHotkeySelect.value,
     microphone_id: microphoneSelect.value || null,
     auto_paste: autoPasteToggle.checked,
     launch_at_login: launchAtLoginToggle.checked,
     recognition_mode: recognitionModeSelect.value,
     streaming_model: streamingModelSelect.value,
+    sense_voice_language: senseVoiceLanguageSelect.value,
     voice_package: voicePackageSelect.value,
     voice_formatting_enabled: voiceFormattingToggle.checked,
+    insert_refined_streaming: insertRefinedStreamingToggle.checked,
+    auto_apply_final_refined: autoApplyFinalRefinedToggle.checked,
+    office_history_enabled: officeHistoryEnabledToggle.checked,
     auto_learning_enabled: autoLearningToggle.checked,
+    pinyin_correction_enabled: pinyinCorrectionToggle.checked,
+    voice_ask_web_search: voiceAskWebSearchToggle.checked,
     streaming_ai_panel_enabled: streamingAiPanelToggle.checked,
     streaming_enhancement_mode: streamingEnhancementModeSelect.value,
     compute_backend: computeBackendSelect.value,
     translation_target_language: translationTargetLanguageSelect.value,
     rewrite_scenario: rewriteScenarioSelect.value,
+    active_industry_pack: industryPackSelect.value,
+    office_panel_mode: officePanelModeSelect.value,
     model_path: modelPathTextarea.value || null,
     pinned_model_version: currentSettings?.pinned_model_version ?? "sherpa-onnx-sense-voice",
     custom_dictionary: currentSettings?.custom_dictionary ?? [],
+    llm_tier: llmTierSelect?.value ?? "standard",
     llm_rewrite: llmRewrite,
   };
 }
@@ -508,14 +729,11 @@ function hasApiKeyConfig(settings) {
 }
 
 function inferLlmRoute(rewrite = {}) {
-  const model = (rewrite.model || "").toLowerCase();
   const presetKey = inferLlmPresetKey(rewrite);
   const preset = getLlmPreset(presetKey);
-  const isOpenAi = preset.provider === "openai" || /^gpt[-\w.]*|^o\d/.test(model);
   return {
     key: presetKey,
     label: preset.label,
-    isOpenAi,
   };
 }
 
@@ -543,9 +761,7 @@ function updateLlmActiveRoute(settings) {
   if (apiReady) {
     const rewrite = settings.llm_rewrite ?? {};
     const route = inferLlmRoute(rewrite);
-    const keyTip = route.isOpenAi
-      ? "正在使用 OpenAI Platform API Key；ChatGPT Plus/Pro 订阅不等于 API 免费额度。"
-      : "正在使用上方 API Key 做结构化润写。";
+    const keyTip = "正在使用上方 API Key 做结构化润写。";
     llmActiveRouteLabel.textContent = `当前服务：${route.label}。${keyTip}`;
     llmActiveRouteLabel.dataset.tone = "success";
     return;
@@ -592,7 +808,7 @@ function renderDictionaryView() {
   });
 
   if (visibleEntries.length === 0) {
-    dictionaryList.innerHTML = `<div class="dictionary-empty">还没有匹配的词条。可以先点上方“添加常用词”，例如客户姓名、产品名、项目名。</div>`;
+    dictionaryList.innerHTML = `<div class="dictionary-empty">还没有“我的词”。点上方“＋ 添加我的词”，把客户姓名、产品名、项目名、专业术语加进来。</div>`;
     return;
   }
 
@@ -600,8 +816,9 @@ function renderDictionaryView() {
   dictionaryList.innerHTML = visibleEntries
     .sort((a, b) => (sourceRank[a.source] ?? 9) - (sourceRank[b.source] ?? 9) || a.term.localeCompare(b.term, "zh-CN"))
     .map((entry) => {
-      const aliasText = (entry.aliases ?? []).join("、") || "常用词保护";
-      const kindLabel = entry.kind === "replacement" ? "纠错词" : "常用词";
+      const aliases = entry.aliases ?? [];
+      const aliasText = aliases.length ? `常被错识别成：${aliases.join("、")}` : "同音字会自动纠正";
+      const kindLabel = aliases.length ? "带纠错" : "我的词";
       const sourceLabel = entry.source === "auto_learned" ? "自动学习"
         : entry.source === "import" ? "批量导入"
           : entry.source === "legacy" ? "旧版迁移"
@@ -658,16 +875,10 @@ function openDictionaryEditor(entry = null, mode = "term") {
   dictionaryEditorMode = entry?.kind ?? mode;
   dictionaryTermInput.value = entry?.term ?? "";
   dictionaryAliasInput.value = (entry?.aliases ?? []).join("，");
-  const isReplacement = dictionaryEditorMode === "replacement";
-  dictionaryEditorTitle.textContent = activeDictionaryEntryId
-    ? "编辑词条"
-    : (isReplacement ? "添加纠错词" : "添加常用词");
-  dictionaryEditorHelp.textContent = isReplacement
-    ? "把经常听错的说法填到下面，例如“迷你麦克斯”，正确词填 MiniMax。"
-    : "保存人名、品牌、项目名、专业词，润写和翻译时会尽量保留。";
-  dictionaryAliasInput.placeholder = isReplacement
-    ? "可能识别错的词，例如：迷你麦克斯；多个用逗号隔开"
-    : "可不填。也可以填别名，例如简称、旧称";
+  dictionaryEditorTitle.textContent = activeDictionaryEntryId ? "编辑我的词" : "添加我的词";
+  dictionaryEditorHelp.textContent =
+    "填正确写法即可；识别老听错时，再补一下“常被错识别成”。留空也会自动纠正同音字。";
+  dictionaryAliasInput.placeholder = "常被错识别成，可不填；多个用逗号隔开";
   dictionaryEditor.hidden = false;
   dictionaryTermInput.focus();
 }
@@ -893,7 +1104,7 @@ function formatAsrDiagnostics(report) {
     `运行状态开始时间: ${report.runtime_status_since || "未知"}`,
     `最近非流式耗时: engine=${timing.engine_ready_ms ?? "-"}ms, asr=${timing.asr_ms ?? "-"}ms, cleanup=${timing.cleanup_ms ?? "-"}ms, quality=${timing.quality_ms ?? "-"}ms, output=${timing.output_ms ?? "-"}ms, total=${timing.total_ms ?? "-"}ms`,
     `最近非流式断句: ${timing.punctuation_source || "无"}${timing.punctuation_timed_out ? "（超时降级）" : ""}`,
-    `LLM 是否阻塞首回填: ${timing.llm_blocked ? "是" : "否"}`,
+    `在线 AI 是否阻塞首回填: ${timing.llm_blocked ? "是" : "否"}`,
     `后台精修长度: ${report.last_non_streaming_refined_text_length || 0}`,
     `说明: ${report.message}`,
   ].join("\n");
@@ -919,6 +1130,9 @@ function publicModelPathLabel(pathLabel) {
 }
 
 async function refreshSettingsView(statusMessage = null) {
+  if (!officeCatalog.templates.length) {
+    officeCatalog = await electronAPI.getOfficeTemplateCatalog();
+  }
   const view = await electronAPI.getSettingsViewData();
   fillSettingsView(view);
   await loadDictionaryView();
@@ -970,14 +1184,48 @@ function applyHotkeyProfile(profile) {
   if (profile === "alt") {
     hotkeySelect.value = "AltDictation";
     translateHotkeySelect.value = "AltTranslation";
-    setStatus("已切换为 ALT 方案：右 Alt 语音、右 Alt + Shift 翻译。");
+    voiceAskHotkeySelect.value = "DoubleCtrl";
+    setStatus("已切换为右 ALT 语音方案：按住右 Alt 说话、松开出字，按住右 Alt + Shift 翻译，双击 Ctrl 问答。");
   } else {
     hotkeySelect.value = "CtrlSlash";
     translateHotkeySelect.value = "CtrlDot";
-    setStatus("已切换为 CTRL 方案：Ctrl+/ 语音、Ctrl+. 翻译。");
+    voiceAskHotkeySelect.value = "DoubleCtrl";
+    setStatus("已切换为 CTRL 方案：Ctrl+/ 语音、Ctrl+. 翻译、双击 Ctrl 问答。");
   }
   cancelScheduledSave();
   void persistSettings();
+}
+
+async function testShortcut(actionId) {
+  hotkeyTestStatus.textContent = "请在 8 秒内按一次要测试的快捷键…";
+  hotkeyTestStatus.dataset.tone = "";
+  try {
+    const result = await electronAPI.testShortcut(actionId);
+    hotkeyTestStatus.textContent = result.message;
+    hotkeyTestStatus.dataset.tone = result.ok ? "success" : "error";
+  } catch (error) {
+    hotkeyTestStatus.textContent = error?.message || "快捷键测试未完成。";
+    hotkeyTestStatus.dataset.tone = "error";
+  }
+}
+
+async function probeDictionary() {
+  const text = dictionaryProbeInput.value.trim();
+  if (!text) {
+    dictionaryProbeResult.innerHTML = '<div class="dictionary-preview-warning">请先输入测试文本。</div>';
+    return;
+  }
+  const result = await electronAPI.probeDictionary(text, industryPackSelect.value || "general_office");
+  const hits = [
+    ["个人词典", result.personal_terms], ["系统词库", result.system_terms],
+    ["混输词库", result.code_switch_terms], ["行业词库", result.industry_terms],
+  ].filter(([, terms]) => terms?.length);
+  dictionaryProbeResult.innerHTML = `
+    <div class="dictionary-preview-summary"><strong>${escapeHtml(result.summary)}</strong></div>
+    <div class="dictionary-preview-row"><span>处理结果</span><strong>${escapeHtml(result.output_text)}</strong></div>
+    ${hits.map(([label, terms]) => `<div class="dictionary-preview-row"><span>${escapeHtml(label)}</span><strong>${terms.map(escapeHtml).join("、")}</strong></div>`).join("")}
+    <div class="dictionary-preview-row"><span>生效链路</span><strong>${result.applies_to.map(escapeHtml).join("、")}</strong></div>
+  `;
 }
 
 async function runAction(command, successMessage, failureMessage = "请求没有成功。已写入本地日志。") {
@@ -1018,24 +1266,36 @@ preloadStatusGrid?.addEventListener("click", (event) => {
 
 hotkeyProfileDefaultButton.addEventListener("click", () => applyHotkeyProfile("default"));
 hotkeyProfileAltButton.addEventListener("click", () => applyHotkeyProfile("alt"));
+document.querySelector("#test-dictation-hotkey").addEventListener("click", () => void testShortcut("dictation"));
+document.querySelector("#test-voice-ask-hotkey").addEventListener("click", () => void testShortcut("voice_ask"));
 
 for (const element of [
   hotkeySelect,
   translateHotkeySelect,
+  voiceAskHotkeySelect,
   microphoneSelect,
   autoPasteToggle,
   launchAtLoginToggle,
   recognitionModeSelect,
   streamingModelSelect,
   voiceFormattingToggle,
+  insertRefinedStreamingToggle,
+  autoApplyFinalRefinedToggle,
+  officeHistoryEnabledToggle,
   autoLearningToggle,
+  pinyinCorrectionToggle,
+  voiceAskWebSearchToggle,
   streamingAiPanelToggle,
   streamingEnhancementModeSelect,
   computeBackendSelect,
   translationTargetLanguageSelect,
   rewriteScenarioSelect,
+  industryPackSelect,
+  officePanelModeSelect,
   llmEnabledToggle,
   llmProviderSelect,
+  llmTierSelect,
+  llmModelSelect,
 ]) {
   element.addEventListener("change", () => {
     if (element === llmEnabledToggle) {
@@ -1045,6 +1305,24 @@ for (const element of [
       applyLlmPresetToControls(llmProviderSelect.value);
       llmTestStatus.textContent = "";
       llmTestStatus.dataset.tone = "";
+    }
+    if (element === recognitionModeSelect || element === streamingModelSelect) {
+      syncLiveStreamingToggle();
+    }
+    updateLlmActiveRoute(collectSettings());
+    cancelScheduledSave();
+    void persistSettings();
+  });
+}
+
+// 总开关：开→流式输出（分段近实时离线 SenseVoice，逐句出字）；关→非流式整段离线。
+if (liveStreamingToggle) {
+  liveStreamingToggle.addEventListener("change", () => {
+    if (liveStreamingToggle.checked) {
+      recognitionModeSelect.value = "streaming_output";
+      streamingModelSelect.value = "multilingual_segmented";
+    } else {
+      recognitionModeSelect.value = "non_streaming";
     }
     updateLlmActiveRoute(collectSettings());
     cancelScheduledSave();
@@ -1070,6 +1348,14 @@ modelPathTextarea.addEventListener("blur", () => {
   cancelScheduledSave();
   void persistSettings();
 });
+
+if (llmOpenApiKeyPageButton) {
+  llmOpenApiKeyPageButton.addEventListener("click", () => {
+    const providerKey = llmProviderSelect.value;
+    if (!providerKey) return;
+    void electronAPI.openApiKeyPage(providerKey);
+  });
+}
 
 llmTestButton.addEventListener("click", async () => {
   llmTestStatus.textContent = "测试中...";
@@ -1115,7 +1401,6 @@ dictionaryList.addEventListener("click", (event) => {
   void handleDictionaryListAction(event);
 });
 dictionaryAddTermButton.addEventListener("click", () => openDictionaryEditor(null, "term"));
-dictionaryAddReplacementButton.addEventListener("click", () => openDictionaryEditor(null, "replacement"));
 dictionaryShowImportButton.addEventListener("click", () => {
   dictionaryPasteInput.focus();
 });
@@ -1134,6 +1419,13 @@ dictionaryConfirmImportButton.addEventListener("click", () => {
 });
 dictionaryExportButton.addEventListener("click", () => {
   void exportDictionary();
+});
+dictionaryProbeButton.addEventListener("click", () => void probeDictionary());
+dictionaryProbeInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    void probeDictionary();
+  }
 });
 systemLexiconToggle.addEventListener("change", async () => {
   try {
@@ -1239,6 +1531,30 @@ document.querySelector("#feedback-button").addEventListener("click", () => {
   runAction("openFeedbackEmail", "已打开反馈邮件。");
 });
 
+document.querySelector("#office-start-voice-ask").addEventListener("click", () => {
+  void electronAPI.startVoiceAsk();
+});
+document.querySelector("#office-show-streaming-panel").addEventListener("click", () => {
+  void electronAPI.showStreamingAiPanel();
+});
+document.querySelector("#office-organize-clipboard").addEventListener("click", () => {
+  void runOfficeWorkspaceAction(() => electronAPI.organizeClipboardText(), "正在整理剪贴板内容…");
+});
+document.querySelector("#office-organize-selection").addEventListener("click", () => {
+  void runOfficeWorkspaceAction(() => electronAPI.organizeSelectedText(), "正在读取并整理选中文本…");
+});
+document.querySelector("#office-import-file").addEventListener("click", () => {
+  void runOfficeWorkspaceAction(() => electronAPI.importOfficeFile(), "正在读取办公文件…");
+});
+document.querySelector("#office-clear-history").addEventListener("click", async () => {
+  await electronAPI.clearOfficeHistory();
+  await loadOfficeHistory();
+  setStatus("本机办公历史已清空。");
+});
+for (const button of document.querySelectorAll("[data-panel-jump]")) {
+  button.addEventListener("click", () => activatePanel(button.dataset.panelJump));
+}
+
 refreshSettingsView().catch(() => {
   setStatus("设置加载失败。已写入本地日志。", "error");
 });
@@ -1247,6 +1563,92 @@ unsubscribeSettingsViewData = electronAPI.subscribeSettingsViewData((view) => {
   fillSettingsView(view);
 });
 
+let unsubscribeSettingsFocus = null;
+if (typeof electronAPI.subscribeSettingsFocus === "function") {
+  unsubscribeSettingsFocus = electronAPI.subscribeSettingsFocus((focus) => {
+    if (focus === "llm") {
+      activatePanel("panel-general");
+      const target = llmEnabledToggle?.closest(".settings-group") || llmEnabledToggle;
+      target?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  });
+}
+
 window.addEventListener("beforeunload", () => {
   unsubscribeSettingsViewData?.();
+  unsubscribeSettingsFocus?.();
+});
+
+// —— 行业专业词表（0.6.3）——————————————————————————————
+// 长尾行业（监狱、公安、物业…）在系统大词库里一条对应领域词都没有，
+// 自建词表是它们唯一的扩词途径，所以这里要把"这个行业能不能借到大词库的词"讲清楚，
+// 不能让用户以为选了包就自动有几万个词。
+// 元素用到时才查：fillSettingsView 可能在本段代码执行前就被订阅回调触发。
+function getIndustryTermsDescription() {
+  return document.querySelector("#industry-terms-description");
+}
+
+function renderIndustryTermStats(stats, notice) {
+  const description = getIndustryTermsDescription();
+  if (!description || !stats) {
+    return;
+  }
+  const lexiconNote = stats.lexicon_categories.length > 0
+    ? `可借用系统词库的「${stats.lexicon_categories.join("、")}」类目`
+    : "系统词库没有该行业的专业词，扩词请靠导入";
+  const parts = [
+    `${stats.industry_name}：内置 ${stats.builtin_count} 词，自建 ${stats.custom_count} 词；${lexiconNote}。`,
+    "支持 txt / csv / xlsx / xls / docx，一行一个词。",
+  ];
+  if (notice) {
+    parts.push(notice);
+  }
+  description.textContent = parts.join(" ");
+}
+
+async function refreshIndustryTermStats(notice) {
+  if (typeof electronAPI.getIndustryTermStats !== "function") {
+    return;
+  }
+  try {
+    renderIndustryTermStats(await electronAPI.getIndustryTermStats(), notice);
+  } catch (error) {
+    console.warn("读取行业词表统计失败", error);
+  }
+}
+
+// 统计按"已保存"的行业包算，所以刚改完下拉框要先保存才会变。
+document.querySelector("#import-industry-terms")?.addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    const result = await electronAPI.importIndustryTerms();
+    if (result.canceled) {
+      return;
+    }
+    renderIndustryTermStats(
+      result.stats,
+      result.ok
+        ? `本次导入 ${result.added} 词，跳过重复/无效 ${result.skipped} 词。`
+        : `导入失败：${result.error ?? "未知错误"}`
+    );
+  } catch (error) {
+    await refreshIndustryTermStats(`导入失败：${error?.message ?? error}`);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+document.querySelector("#clear-industry-terms")?.addEventListener("click", async () => {
+  if (!window.confirm("清空当前行业包的自建词表？内置专业词不受影响。")) {
+    return;
+  }
+  renderIndustryTermStats(await electronAPI.clearIndustryTerms(), "自建词表已清空。");
+});
+
+// 换行业包后立刻重排模板下拉，把该行业的专用文书顶到最前（保留当前已选模板）。
+industryPackSelect?.addEventListener("change", () => {
+  if (officeCatalog.templates.length) {
+    populateOfficeCatalog(officeCatalog, rewriteScenarioSelect.value, industryPackSelect.value);
+  }
 });

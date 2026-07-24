@@ -69,6 +69,30 @@ test("AsrHotwordManager writes high-value runtime hotwords for Chinese CTC strea
   }
 });
 
+test("AsrHotwordManager includes industry template terms in runtime hotwords", () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "typetype-hotwords-"));
+  try {
+    const manager = new AsrHotwordManager({ dataDir });
+    const result = manager.prepareHotwords({
+      modelFiles: {
+        modelPath: "C:/models/ctc/model.int8.onnx",
+        tokensPath: "C:/models/ctc/tokens.txt",
+        modelKind: "single",
+        bpeVocabPath: "C:/models/ctc/bpe.model",
+      },
+      settings: createSettings(),
+      industryTerms: ["狱政管理科", "狱侦管理", "教育改造科"],
+    });
+
+    assert.equal(result.enabled, true);
+    const content = fs.readFileSync(result.path, "utf8");
+    assert.match(content, /狱政管理科/);
+    assert.match(content, /狱侦管理/);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("AsrHotwordManager disables bottom-layer hotwords for multilingual model paths", () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "typetype-hotwords-"));
   try {

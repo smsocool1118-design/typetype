@@ -57,6 +57,15 @@ test("CodeSwitchLexicon keeps AI professional terms as English inside Chinese sp
   assert.equal(result.text.includes("DeepSeek V4 Flash"), true);
 });
 
+test("0.5.3: 阿拉伯数字与中文量词/日期单位之间不加空格，英文词仍加空格", () => {
+  const lexicon = createLexicon();
+  assert.equal(lexicon.applyToText("8月2日开会").text, "8月2日开会");
+  assert.equal(lexicon.applyToText("预算5元买了10个").text, "预算5元买了10个");
+  assert.equal(lexicon.applyToText("2026年8月28日").text, "2026年8月28日");
+  // 含字母的英文词/缩写仍保留中英间隔：
+  assert.equal(lexicon.applyToText("用GPT模型调API接口").text, "用 GPT 模型调 API 接口");
+});
+
 test("CodeSwitchLexicon avoids high-risk false positives without technical context", () => {
   const lexicon = createLexicon();
   const result = lexicon.applyToText("他说披啊这个词只是语气词，不是代码合并");
