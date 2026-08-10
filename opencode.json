@@ -1,0 +1,31 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "sock5/claude-sonnet-5-thinking",
+  "provider": {
+    "sock5": {
+      "name": "woaiyt1127.sock5.eu.org",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "https://woaiyt1127.sock5.eu.org/v1",
+        "apiKey": "{env:SOCK5_API_KEY}"
+      },
+      "models": {
+        "claude-sonnet-5": {
+          "name": "Claude Sonnet 5",
+          "id": "claude-sonnet-5",
+          "reasoning": false,
+          "tool_call": true,
+          "temperature": true
+        },
+        "claude-sonnet-5-thinking": {
+          "name": "Claude Sonnet 5 Thinking",
+          "id": "claude-sonnet-5-thinking",
+          "reasoning": true,
+          "interleaved": "reasoning_content",
+          "tool_call": true,
+          "temperature": true
+        }
+      }
+    }
+  }
+}
